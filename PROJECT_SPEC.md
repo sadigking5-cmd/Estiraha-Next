@@ -4,7 +4,7 @@
 - **Official Name:** Estiraha Next
 - **Platform Target:** Native Windows Desktop Application (Windows 10/11 x64), installable locally via NSIS `.exe` installer.
 - **Nature of System:** Strictly a local desktop application — **NOT** a cloud SaaS, **NOT** a web hosting app, and **NOT** built on Hono or Cloudflare Pages.
-- **Official Permanent Repository:** `https://github.com/a73971054-lab/Estiraha-Next.git`
+- **Official Permanent Repository:** `https://github.com/sadigking5-cmd/Estiraha-Next.git`
 - **Development Environment:** Genspark Super App — GenCode (multi-account continuity backed by GitHub as single source of truth).
 
 ## 2. Core Engineering Objectives

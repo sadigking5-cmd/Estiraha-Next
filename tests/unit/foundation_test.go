@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a73971054-lab/Estiraha-Next/internal/config"
-	"github.com/a73971054-lab/Estiraha-Next/internal/domain"
-	"github.com/a73971054-lab/Estiraha-Next/internal/fsops"
-	"github.com/a73971054-lab/Estiraha-Next/internal/imagecache"
-	"github.com/a73971054-lab/Estiraha-Next/internal/naming"
-	"github.com/a73971054-lab/Estiraha-Next/internal/providers"
-	"github.com/a73971054-lab/Estiraha-Next/internal/review"
-	"github.com/a73971054-lab/Estiraha-Next/internal/secrets"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/config"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/domain"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/fsops"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/imagecache"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/naming"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/providers"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/review"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/secrets"
 )
 
 func TestAllSupportedMediaTypesAndImmutableIDs(t *testing.T) {

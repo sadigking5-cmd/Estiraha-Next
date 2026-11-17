@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a73971054-lab/Estiraha-Next/internal/db"
-	"github.com/a73971054-lab/Estiraha-Next/internal/domain"
-	"github.com/a73971054-lab/Estiraha-Next/internal/naming"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/db"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/domain"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/naming"
 )
 
 func TestSQLiteWALMigrationsForeignKeysAndBilingualFTS5(t *testing.T) {

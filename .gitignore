@@ -25,15 +25,15 @@ configs/local.config.json
 *.sqlite
 *.sqlite3
 *.sql.bak
-backups/
-data/
-appdata/
+/backups/
+/data/
+/appdata/
 
 # 3. Smart Image Engine Cache & Provider Response Cache
-cache/
-imagecache/
-artwork-cache/
-provider-cache/
+/cache/
+/imagecache/
+/artwork-cache/
+/provider-cache/
 
 # 4. Real Media Files & Archives (Strictly excluded from repository)
 *.mkv

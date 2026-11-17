@@ -5,7 +5,7 @@
 > **Important Scope Notice:** Estiraha Next is a locally installed Windows desktop system (`NSIS .exe`) built to handle **200,000+ local media files** across multiple physical drives. It is **not** a cloud web application.
 
 ## Official Repository
-- **GitHub (Single Source of Truth):** `https://github.com/a73971054-lab/Estiraha-Next.git`
+- **GitHub (Single Source of Truth):** `https://github.com/sadigking5-cmd/Estiraha-Next.git`
 - **Active Branch:** `main`
 - **Current Milestone:** **Phase 0 — Official Project Foundation (Completed)**
 

@@ -1,4 +1,4 @@
-module github.com/a73971054-lab/Estiraha-Next
+module github.com/sadigking5-cmd/Estiraha-Next
 
 go 1.23.6
 

@@ -13,7 +13,7 @@
 | **ADR-007** | Secret Storage | **Windows Credential Manager** (`Advapi32` Generic Credentials) referenced only by key name in `data_providers.credential_manager_target`. | OS-encrypted per-user Windows DPAPI protection; zero plaintext secrets in DB or Git. |
 | **ADR-008** | Smart Image Engine | 5-tier cache + Memory/Disk LRU (2 GiB initial customizable cap) in `%LOCALAPPDATA%`, JPEG/PNG/WebP magic-byte check, **SVG blocked**, user local images immutable. | High-FPS poster scrolling at 200k scale while preventing XSS/XXE and protecting user folders. |
 | **ADR-009** | API Hub Governance | Pluggable `Adapter` per provider; `metadata_claims` provenance & confidence; DeepSeek opt-in per request + path scrubbing; OpenSubtitles `search_only`; ElCinema `deferred_legal_review`. | Legal compliance, attribution tracking, conflict visibility, and strict user privacy. |
-| **ADR-010** | Source of Truth & Continuity | Official GitHub repo `https://github.com/a73971054-lab/Estiraha-Next.git` + 10 root continuity documents updated at every phase boundary. | Seamless handoff across different Genspark accounts without losing state or architectural context. |
+| **ADR-010** | Source of Truth & Continuity | Official GitHub repo `https://github.com/sadigking5-cmd/Estiraha-Next.git` + 10 root continuity documents updated at every phase boundary. | Seamless handoff across different Genspark accounts without losing state or architectural context. |
 
 ---
 

@@ -9,7 +9,7 @@ import (
 	"errors"
 	"os"
 
-	"github.com/a73971054-lab/Estiraha-Next/internal/review"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/review"
 )
 
 var (

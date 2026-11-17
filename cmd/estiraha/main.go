@@ -11,9 +11,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/a73971054-lab/Estiraha-Next/internal/config"
-	"github.com/a73971054-lab/Estiraha-Next/internal/db"
-	"github.com/a73971054-lab/Estiraha-Next/internal/secrets"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/config"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/db"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/secrets"
 )
 
 func main() {

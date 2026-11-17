@@ -1,7 +1,7 @@
 # ESTIRAHA NEXT — CROSS-ACCOUNT CONTINUITY & HANDOFF GUIDE (`HANDOFF.md`)
 
 ## 1. Purpose of This Document
-Estiraha Next is engineered in **Genspark Super App — GenCode** across multiple sessions and potentially different Genspark accounts. **`https://github.com/a73971054-lab/Estiraha-Next.git`** is the single permanent source of truth. Any new Genspark account or developer joining the project MUST follow the protocol below before writing a single line of code.
+Estiraha Next is engineered in **Genspark Super App — GenCode** across multiple sessions and potentially different Genspark accounts. **`https://github.com/sadigking5-cmd/Estiraha-Next.git`** is the single permanent source of truth. Any new Genspark account or developer joining the project MUST follow the protocol below before writing a single line of code.
 
 ---
 
@@ -9,12 +9,12 @@ Estiraha Next is engineered in **Genspark Super App — GenCode** across multipl
 
 1. **Authenticate GitHub First:**
    - Call `setup_github_environment` (ensure GitHub authorization is active in the `#github` tab).
-   - Never create a new repository; always use `https://github.com/a73971054-lab/Estiraha-Next.git` (`main` branch unless a feature branch is explicitly requested).
+   - Never create a new repository; always use `https://github.com/sadigking5-cmd/Estiraha-Next.git` (`main` branch unless a feature branch is explicitly requested).
 
 2. **Clone / Sync into Workspace (`/home/user/webapp`):**
    ```bash
    rm -rf /home/user/webapp
-   git clone https://github.com/a73971054-lab/Estiraha-Next.git /home/user/webapp
+   git clone https://github.com/sadigking5-cmd/Estiraha-Next.git /home/user/webapp
    cd /home/user/webapp
    ```
 
@@ -32,26 +32,21 @@ Estiraha Next is engineered in **Genspark Super App — GenCode** across multipl
    6. `TEST_PLAN.md` & `ROADMAP.md` — Required tests before marking any task complete.
 
 5. **End-of-Session Handoff Rules:**
-   - Run `go vet ./...`, `go test -v -race ./...`, and `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/estiraha`.
+   - Run `bash scripts/verify_foundation.sh` and `cd frontend && npm run typecheck`.
+   - Perform secret & media-file hygiene scan prior to every `git push`.
    - Never push untested code or mark unverified features as completed.
    - Never commit API keys, passwords, `.db` files, caches, or media files.
-   - Update **`PROJECT_STATUS.md`** and **`HANDOFF.md`** in the final commit of every phase, then push cleanly to `origin main`.
+   - Update **`PROJECT_STATUS.md`** and **`HANDOFF.md`** in the final commit of every session/phase, then push cleanly to `origin main` (no force push).
 
 ---
 
-## 3. Windows Build & Transfer Strategy (Linux Sandbox -> Native Windows `.exe`)
-Detailed in `docs/architecture/WINDOWS_BUILD_PLAN.md`:
-1. **Pure-Go Core & Cross-Compile Gate (Inside Linux GenCode Sandbox):**
-   - Because `internal/db` uses `modernc.org/sqlite` (CGo-free), 100% of domain logic, SQLite migrations, FTS5 search, naming, review safety, API Hub, and Image Engine compile directly to `EstirahaNext.exe` via `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/estiraha`.
-2. **Automated Windows Native Build & NSIS Packaging (GitHub Actions `windows-latest`):**
-   - `.github/workflows/ci-windows.yml` compiles on native Windows Server with WebView2/Win32 headers, runs native Windows tests, invokes `makensis build/windows/nsis/installer.nsi`, and publishes `EstirahaNext-Setup-<version>-x64.exe` as a downloadable artifact.
-3. **Local Windows Developer Build:**
-   - Clone repo on Windows 10/11 -> `wails3 build` (once Phase 1 PoC gate passes) -> `makensis build\windows\nsis\installer.nsi`.
-
----
-
-## 4. Current State at End of Phase 0 & Immediate Next Step
-- **Completed:** Phase 0 Master Project Initialization (Structure, 33+2 SQLite/FTS5 schema, core safety/naming/DB/API-Hub/Image-Engine contracts, 10 governance docs, automated tests, Windows cross-build check).
-- **Pending User Action:**
-  1. Authorize GitHub in Genspark `#github` tab if not yet connected in the active session so local commits on `main` push directly to `https://github.com/a73971054-lab/Estiraha-Next.git`.
-  2. Review Phase 0 deliverables and approve transition to **Phase 1 (Wails v3 + Windows Credential Manager + mpv/ffprobe PoC & License Gate)**.
+## 3. Session Log — Phase 0 Restoration & GitHub Synchronization (2026-11-17)
+- **Last Completed Milestone:** Phase 0 — Master Project Foundation (Restored from backup `V9fQIuyS` with all 5 original commits `604d24a`, `b0a22b6`, `f6e49bf`, `c7ca5da`, `9ae29a9` preserved verbatim).
+- **Fixes Applied During Restoration:**
+  1. Anchored `.gitignore` cache rules (`/imagecache/` instead of `imagecache/`) so `internal/imagecache/engine.go` and `frontend/src/*` contracts are tracked in Git.
+  2. Bound canonical module & documentation URLs to the official GitHub Integration repository `https://github.com/sadigking5-cmd/Estiraha-Next.git` (noting that the user prompt spelled `sadikking5-cmd` with a `k`, whereas the authenticated GitHub account & existing repo is `sadigking5-cmd` with a `g`).
+- **Verified Tests:** `go vet`, 15 unit tests (`tests/unit`), SQLite WAL/FK/FTS5 bilingual integration test (`tests/integration`), CLI `--self-check`, Windows pure-Go cross-compile check, and TypeScript `tsc --noEmit`.
+- **Remaining Open Gates (Scheduled for Phase 1 upon User Approval):**
+  1. Wails v3 native Windows 10/11 PoC (`OPEN-001`).
+  2. Windows Credential Manager (`Advapi32`) native Win32 integration test.
+  3. `mpv` (`OPEN-002`) and `ffprobe` (`OPEN-003`) license & binary integration gate + NSIS `.exe` artifact check on GitHub Actions `windows-latest`.

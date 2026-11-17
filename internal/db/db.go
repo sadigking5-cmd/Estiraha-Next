@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a73971054-lab/Estiraha-Next/migrations"
+	"github.com/sadigking5-cmd/Estiraha-Next/migrations"
 	_ "github.com/mattn/go-sqlite3"
 )
 
