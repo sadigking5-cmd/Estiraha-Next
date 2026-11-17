@@ -45,6 +45,9 @@ configs/local.config.json
 *.webm
 *.m4v
 *.ts
+!frontend/**/*.ts
+!frontend/**/*.tsx
+!frontend/**/*.d.ts
 *.m2ts
 *.mp3
 *.flac

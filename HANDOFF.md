@@ -43,8 +43,9 @@ Estiraha Next is engineered in **Genspark Super App — GenCode** across multipl
 ## 3. Session Log — Phase 0 Restoration & GitHub Synchronization (2026-11-17)
 - **Last Completed Milestone:** Phase 0 — Master Project Foundation (Restored from backup `V9fQIuyS` with all 5 original commits `604d24a`, `b0a22b6`, `f6e49bf`, `c7ca5da`, `9ae29a9` preserved verbatim).
 - **Fixes Applied During Restoration:**
-  1. Anchored `.gitignore` cache rules (`/imagecache/` instead of `imagecache/`) so `internal/imagecache/engine.go` and `frontend/src/*` contracts are tracked in Git.
-  2. Bound canonical module & documentation URLs to the official GitHub Integration repository `https://github.com/sadigking5-cmd/Estiraha-Next.git` (noting that the user prompt spelled `sadikking5-cmd` with a `k`, whereas the authenticated GitHub account & existing repo is `sadigking5-cmd` with a `g`).
+  1. Anchored `.gitignore` cache rules (`/imagecache/` instead of `imagecache/`) and whitelisted `!frontend/**/*.ts` / `!frontend/**/*.tsx` (distinguishing TypeScript source files from MPEG-TS `*.ts` video streams) so `internal/imagecache/engine.go` and `frontend/src/*` contracts are cleanly tracked in Git.
+  2. Relocated `.github/workflows/ci-windows.yml` to `build/ci/ci-windows.yml` because the Genspark GitHub App token grants `contents: write` without `workflows: write` scope (preventing push rejection on `.github/workflows/*` while preserving 100% of the original 5 commits `604d24a..9ae29a9` verbatim without force push).
+  3. Bound canonical module & documentation URLs to the official GitHub Integration repository `https://github.com/sadigking5-cmd/Estiraha-Next.git` (noting that the user prompt spelled `sadikking5-cmd` with a `k`, whereas the authenticated GitHub account & linked repo is `sadigking5-cmd` with a `g`).
 - **Verified Tests:** `go vet`, 15 unit tests (`tests/unit`), SQLite WAL/FK/FTS5 bilingual integration test (`tests/integration`), CLI `--self-check`, Windows pure-Go cross-compile check, and TypeScript `tsc --noEmit`.
 - **Remaining Open Gates (Scheduled for Phase 1 upon User Approval):**
   1. Wails v3 native Windows 10/11 PoC (`OPEN-001`).
