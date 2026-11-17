@@ -1,0 +1,19 @@
+{
+  "name": "estiraha-next-frontend",
+  "private": true,
+  "version": "0.1.0-phase0",
+  "description": "Estiraha Next — Windows Desktop Media Library UI Layer (Wails v3 + React + TypeScript)",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "typescript": "5.6.3"
+  }
+}
