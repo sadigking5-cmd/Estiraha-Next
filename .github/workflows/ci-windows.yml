@@ -1,0 +1,54 @@
+name: Estiraha Next — Verify & Windows Native Packaging
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-unit-and-db-tests:
+    name: Go Unit, SQLite Schema & FTS5 Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.6'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install libsqlite3-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsqlite3-dev
+      - name: Run Foundation Verification Suite
+        run: bash scripts/verify_foundation.sh
+      - name: Typecheck Frontend TypeScript Contracts
+        working-directory: frontend
+        run: npm install && npm run typecheck
+
+  windows-native-packaging:
+    name: Windows Native Test & NSIS Packaging Gate
+    runs-on: windows-latest
+    needs: linux-unit-and-db-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.6'
+      - name: Run Native Windows Tests (CGO + SQLite FTS5)
+        env:
+          CGO_ENABLED: '1'
+        run: go test -v -tags "sqlite_fts5" ./...
+      - name: Build Windows x64 Executable
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\windows-amd64
+          go build -trimpath -tags "sqlite_fts5" -o dist\windows-amd64\EstirahaNext.exe .\cmd\estiraha
+      - name: Build NSIS Installer (.exe)
+        run: makensis build\windows\nsis\installer.nsi
+      - name: Upload Windows Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EstirahaNext-Windows-x64-Installer
+          path: dist/EstirahaNext-Setup-*.exe

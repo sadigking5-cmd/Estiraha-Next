@@ -1,0 +1,53 @@
+{
+  "app": {
+    "name": "Estiraha Next",
+    "code_name": "estiraha-next",
+    "version": "0.1.0-phase0",
+    "default_language": "ar",
+    "supported_languages": ["ar", "en"],
+    "theme": "dark",
+    "run_in_tray": true
+  },
+  "database": {
+    "driver": "sqlite",
+    "journal_mode": "WAL",
+    "synchronous": "NORMAL",
+    "foreign_keys": true,
+    "busy_timeout_ms": 10000,
+    "cache_size_kb": -64000,
+    "auto_backup_before_migration": true
+  },
+  "safety": {
+    "require_explicit_review_approval": true,
+    "allow_automatic_move": false,
+    "allow_automatic_rename": false,
+    "allow_automatic_delete": false,
+    "allow_overwrite_existing": false,
+    "watcher_read_only_mode": true,
+    "archive_auto_extract": false,
+    "trash_manual_empty_only": true
+  },
+  "image_engine": {
+    "max_disk_cache_bytes": 2147483648,
+    "memory_cache_mb": 256,
+    "eviction_policy": "LRU",
+    "allow_svg": false,
+    "allowed_mime_types": ["image/jpeg", "image/png", "image/webp"],
+    "max_image_bytes": 15728640,
+    "max_dimension_px": 8192,
+    "store_temp_outside_user_library": true
+  },
+  "api_hub": {
+    "auto_connect_unknown_providers": false,
+    "deepseek_enabled": false,
+    "deepseek_require_per_request_consent": true,
+    "elcinema_status": "deferred_pending_legal_verification",
+    "opensubtitles_mode": "search_only"
+  },
+  "player": {
+    "default_engine": "mpv_candidate",
+    "fallback_external": "vlc",
+    "resume_threshold_seconds": 30,
+    "watched_completion_percent": 90
+  }
+}

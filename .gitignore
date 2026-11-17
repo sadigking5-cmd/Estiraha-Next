@@ -1,0 +1,103 @@
+# ==============================================================================
+# ESTIRAHA NEXT — OFFICIAL GITIGNORE & SECURITY BOUNDARY
+# Never commit secrets, user databases, media files, caches, or personal fixtures
+# ==============================================================================
+
+# 1. Secrets, API Keys & Environment Files
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+*.cer
+secrets.json
+credentials.json
+*.secret
+configs/local.config.json
+
+# 2. User SQLite Databases, Backups & Journals
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sql.bak
+backups/
+data/
+appdata/
+
+# 3. Smart Image Engine Cache & Provider Response Cache
+cache/
+imagecache/
+artwork-cache/
+provider-cache/
+
+# 4. Real Media Files & Archives (Strictly excluded from repository)
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.webm
+*.m4v
+*.ts
+*.m2ts
+*.mp3
+*.flac
+*.aac
+*.m4a
+*.ogg
+*.srt
+*.ass
+*.ssa
+*.vtt
+*.sub
+*.idx
+*.nfo
+*.shorts
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+!tests/fixtures/synthetic/**
+
+# 5. Personal or Untracked Test Data
+tests/personal/
+tests/local/
+*.personal.*
+
+# 6. Go Build Artifacts & Binaries
+bin/
+dist/
+build/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# 7. Frontend / Node Artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
+*.tsbuildinfo
+
+# 8. Logs, Crash Dumps & OS Metadata
+logs/
+*.log
+*.dmp
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
