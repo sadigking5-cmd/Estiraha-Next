@@ -1,21 +1,21 @@
 ; ==============================================================================
-; ESTIRAHA NEXT — NSIS WINDOWS INSTALLER TEMPLATE (Phase 0 Foundation)
+; ESTIRAHA NEXT — NSIS WINDOWS INSTALLER (Phase 1A Desktop PoC)
 ; Target: Windows 10/11 x64 (.exe installer)
 ; Principles:
-;   - Never touches user media directories during install/uninstall
-;   - Stores application binaries in $PROGRAMFILES64\Estiraha Next
-;   - Stores local database & cache in $LOCALAPPDATA\EstirahaNext
+;   - Supports both interactive GUI install and silent CI install (/S /D=...)
+;   - Never touches user media directories during install or uninstall
+;   - Leaves zero orphan background processes on uninstall
 ; ==============================================================================
 
 !define APP_NAME "Estiraha Next"
 !define APP_PUBLISHER "Estiraha Engineering"
-!define APP_VERSION "0.1.0"
+!define APP_VERSION "0.1.0-phase1a"
 !define APP_EXE "EstirahaNext.exe"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "..\..\dist\EstirahaNext-Setup-${APP_VERSION}-x64.exe"
-InstallDir "$PROGRAMFILES64\${APP_NAME}"
-RequestExecutionLevel admin
+OutFile "../../../dist/EstirahaNext-Setup-${APP_VERSION}-x64.exe"
+InstallDir "$LOCALAPPDATA\Programs\EstirahaNext"
+RequestExecutionLevel user
 Unicode True
 
 Page directory
@@ -25,7 +25,7 @@ UninstPage instfiles
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File "..\..\dist\windows-amd64\${APP_EXE}"
+  File "../../../dist/windows-amd64/${APP_EXE}"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"

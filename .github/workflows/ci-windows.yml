@@ -1,0 +1,136 @@
+name: Estiraha Next — Phase 1A Windows Desktop PoC & NSIS Verification
+
+on:
+  push:
+    branches:
+      - main
+      - 'phase1a/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  linux-cross-compile-and-unit-tests:
+    name: Linux Unit/DB Tests & MinGW Windows x64 Cross-Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install SQLite3, MinGW-w64 & NSIS
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsqlite3-dev gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nsis file
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run Full Verification Suite
+        run: bash scripts/verify_foundation.sh
+      - name: Cross-Build Windows Executable & NSIS Installer
+        run: bash scripts/build_windows_poc.sh
+
+  windows-native-desktop-poc:
+    name: Windows x64 Native Run, Tray, CredManager, NSIS & Screenshot
+    runs-on: windows-latest
+    needs: linux-cross-compile-and-unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build Frontend Production Bundle
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run Native Windows Unit, SQLite FTS5 & Credential Manager Tests
+        env:
+          CGO_ENABLED: '1'
+        run: go test -v -tags "sqlite_fts5" ./...
+
+      - name: Compile Native Windows x64 GUI Binary (Wails v3 + CGO)
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\windows-amd64 | Out-Null
+          go build -trimpath -tags "production sqlite_fts5" -ldflags "-s -w -H windowsgui" -o dist\windows-amd64\EstirahaNext.exe .\cmd\estiraha
+
+      - name: Package NSIS Installer (.exe) & Test Silent Installation
+        run: |
+          makensis build/windows/nsis/installer.nsi
+          $installDir = "C:\EstirahaPoCInstall"
+          Start-Process -FilePath ".\dist\EstirahaNext-Setup-0.1.0-phase1a-x64.exe" -ArgumentList "/S", "/D=$installDir" -Wait
+          if (-not (Test-Path "$installDir\EstirahaNext.exe")) {
+            throw "NSIS silent installation failed: EstirahaNext.exe missing in $installDir"
+          }
+
+      - name: Launch Installed Windows App, Capture Live Window Screenshot, Verify Tray/CredManager & Zero Orphans
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $reportPath = Join-Path (Get-Location) "artifacts\phase1a-smoke-report.json"
+          $shotPath   = Join-Path (Get-Location) "artifacts\phase1a-windows-window.png"
+
+          $proc = Start-Process -FilePath "C:\EstirahaPoCInstall\EstirahaNext.exe" `
+            -ArgumentList "--poc-smoke-report", $reportPath, "--poc-hold-ms", "5000" `
+            -PassThru
+
+          Start-Sleep -Milliseconds 2800
+
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+          $gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bmp.Save($shotPath, [System.Drawing.Imaging.ImageFormat]::Png)
+          $gfx.Dispose()
+          $bmp.Dispose()
+
+          if (-not $proc.WaitForExit(20000)) {
+            $proc.Kill()
+            throw "EstirahaNext.exe did not exit cleanly within 20s timeout"
+          }
+
+          Start-Sleep -Seconds 1
+          $orphans = Get-Process -Name "EstirahaNext" -ErrorAction SilentlyContinue
+          if ($orphans) {
+            throw "Orphan EstirahaNext process remained after shutdown!"
+          }
+
+          if (-not (Test-Path $reportPath)) {
+            throw "Smoke report JSON was not generated"
+          }
+          $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+          Write-Host ($report | ConvertTo-Json -Depth 6)
+          if (-not $report.success) {
+            throw "Windows Desktop PoC smoke report indicated failure"
+          }
+
+      - name: Verify Missing WebView2 Graceful Handling (Exit Code 78, Zero Crash)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "C:\EstirahaPoCInstall\EstirahaNext.exe" `
+            -ArgumentList "--simulate-missing-webview2", "--headless" `
+            -Wait -PassThru
+          if ($p.ExitCode -ne 78) {
+            throw "Expected ExitCode 78 for simulated missing WebView2, got $($p.ExitCode)"
+          }
+
+      - name: Upload Windows Installer, Live Window Screenshot & Smoke Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: EstirahaNext-Phase1A-Windows-PoC-Evidence
+          path: |
+            dist/EstirahaNext-Setup-0.1.0-phase1a-x64.exe
+            artifacts/phase1a-windows-window.png
+            artifacts/phase1a-smoke-report.json
