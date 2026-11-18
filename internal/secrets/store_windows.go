@@ -2,37 +2,60 @@
 
 package secrets
 
-// WindowsCredManagerVault binds to Windows Credential Manager (Advapi32 Generic Credentials).
-// Phase 0 registers the Windows target architecture; Win32 syscall binding is scheduled for Phase 1 PoC.
-type WindowsCredManagerVault struct {
-	memFallback map[string]string
-}
+import (
+	"errors"
+
+	"github.com/danieljoos/wincred"
+)
+
+// WindowsCredManagerVault stores secrets natively in Windows Credential Manager
+// using Win32 Advapi32 Generic Credentials encrypted per-user by Windows DPAPI.
+type WindowsCredManagerVault struct{}
 
 func NewDefaultVault() Vault {
-	return &WindowsCredManagerVault{memFallback: make(map[string]string)}
+	return &WindowsCredManagerVault{}
 }
 
 func (v *WindowsCredManagerVault) BackendName() string {
-	return "windows-credential-manager"
+	return "windows-credential-manager (Advapi32/DPAPI)"
 }
 
 func (v *WindowsCredManagerVault) Set(targetKey, secretValue string) error {
 	if targetKey == "" || secretValue == "" {
 		return ErrEmptyTargetOrValue
 	}
-	v.memFallback[targetKey] = secretValue
-	return nil
+	cred := wincred.NewGenericCredential(targetKey)
+	cred.UserName = "EstirahaNextLocalUser"
+	cred.CredentialBlob = []byte(secretValue)
+	cred.Persist = wincred.PersistLocalMachine
+	cred.Comment = "Managed locally by Estiraha Next Desktop — Never synced to cloud"
+	return cred.Write()
 }
 
 func (v *WindowsCredManagerVault) Get(targetKey string) (string, error) {
-	val, ok := v.memFallback[targetKey]
-	if !ok {
-		return "", ErrSecretNotFound
+	if targetKey == "" {
+		return "", ErrEmptyTargetOrValue
 	}
-	return val, nil
+	cred, err := wincred.GetGenericCredential(targetKey)
+	if err != nil {
+		if errors.Is(err, wincred.ErrElementNotFound) {
+			return "", ErrSecretNotFound
+		}
+		return "", err
+	}
+	return string(cred.CredentialBlob), nil
 }
 
 func (v *WindowsCredManagerVault) Delete(targetKey string) error {
-	delete(v.memFallback, targetKey)
-	return nil
+	if targetKey == "" {
+		return ErrEmptyTargetOrValue
+	}
+	cred, err := wincred.GetGenericCredential(targetKey)
+	if err != nil {
+		if errors.Is(err, wincred.ErrElementNotFound) {
+			return nil
+		}
+		return err
+	}
+	return cred.Delete()
 }
