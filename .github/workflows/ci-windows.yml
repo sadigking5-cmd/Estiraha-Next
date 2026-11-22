@@ -1,6 +1,7 @@
 name: Estiraha Next — Phase 1A Windows Desktop PoC & NSIS Verification
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -65,12 +66,43 @@ jobs:
           go build -trimpath -tags "production sqlite_fts5" -ldflags "-s -w -H windowsgui" -o dist\windows-amd64\EstirahaNext.exe .\cmd\estiraha
 
       - name: Package NSIS Installer (.exe) & Test Silent Installation
+        shell: pwsh
         run: |
-          makensis build/windows/nsis/installer.nsi
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            Write-Host "makensis.exe not found at default path; installing NSIS via Chocolatey..."
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) {
+              throw "Chocolatey NSIS installation failed with exit code $LASTEXITCODE"
+            }
+          }
+          if (-not (Test-Path $makensis)) {
+            $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
+            if ($cmd) {
+              $makensis = $cmd.Source
+            } else {
+              throw "makensis.exe still missing after Chocolatey installation"
+            }
+          }
+          Write-Host "Using NSIS compiler at: $makensis"
+
+          & $makensis "build/windows/nsis/installer.nsi"
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis build failed with exit code $LASTEXITCODE"
+          }
+
+          $installerPath = Join-Path (Get-Location) "dist\EstirahaNext-Setup-0.1.0-phase1a-x64.exe"
+          if (-not (Test-Path $installerPath)) {
+            throw "Expected NSIS installer not found at: $installerPath"
+          }
+
           $installDir = "C:\EstirahaPoCInstall"
-          Start-Process -FilePath ".\dist\EstirahaNext-Setup-0.1.0-phase1a-x64.exe" -ArgumentList "/S", "/D=$installDir" -Wait
-          if (-not (Test-Path "$installDir\EstirahaNext.exe")) {
-            throw "NSIS silent installation failed: EstirahaNext.exe missing in $installDir"
+          $installProc = Start-Process -FilePath $installerPath -ArgumentList "/S", "/D=$installDir" -Wait -PassThru
+          if ($installProc.ExitCode -ne 0) {
+            throw "NSIS silent installer exited with non-zero code: $($installProc.ExitCode)"
+          }
+          if (-not (Test-Path "$installDir\EstirahaNext.exe") -or -not (Test-Path "$installDir\Uninstall.exe")) {
+            throw "NSIS silent installation incomplete: EstirahaNext.exe or Uninstall.exe missing in $installDir"
           }
 
       - name: Launch Installed Windows App, Capture Live Window Screenshot, Verify Tray/CredManager & Zero Orphans
@@ -126,7 +158,63 @@ jobs:
             throw "Expected ExitCode 78 for simulated missing WebView2, got $($p.ExitCode)"
           }
 
-      - name: Upload Windows Installer, Live Window Screenshot & Smoke Report
+      - name: Test Silent Uninstall & Verify User Data Preservation
+        shell: pwsh
+        run: |
+          $installDir = "C:\EstirahaPoCInstall"
+
+          # Real user-data paths defined in Estiraha Next Architecture & Wails v3 WindowsOptions:
+          # 1) %LOCALAPPDATA%\EstirahaNext (SQLite DB, Backups & Smart Image Engine Cache)
+          # 2) %APPDATA%\EstirahaNext.exe (Wails v3 WebView2 user profile directory)
+          $estirahaDataDir = Join-Path $env:LOCALAPPDATA "EstirahaNext"
+          $estirahaCacheDir = Join-Path $estirahaDataDir "ImageCache"
+          New-Item -ItemType Directory -Force -Path $estirahaCacheDir | Out-Null
+          $dbSentinel = Join-Path $estirahaDataDir "user_library_sentinel.json"
+          $cacheSentinel = Join-Path $estirahaCacheDir "poster_cache_sentinel.bin"
+          Set-Content -Path $dbSentinel -Value '{"sentinel":"DO_NOT_DELETE_USER_LIBRARY_DB"}' -Encoding UTF8
+          Set-Content -Path $cacheSentinel -Value "DO_NOT_DELETE_USER_CACHE" -Encoding UTF8
+
+          $webviewDataDir = Join-Path $env:APPDATA "EstirahaNext.exe"
+          New-Item -ItemType Directory -Force -Path $webviewDataDir | Out-Null
+          $wvSentinel = Join-Path $webviewDataDir "webview2_profile_sentinel.txt"
+          Set-Content -Path $wvSentinel -Value "DO_NOT_DELETE_WEBVIEW_PROFILE" -Encoding UTF8
+
+          # Execute NSIS silent uninstaller synchronously (/S MUST precede _?=$installDir)
+          $uninstProc = Start-Process -FilePath "$installDir\Uninstall.exe" `
+            -ArgumentList "/S", "_?=$installDir" `
+            -Wait -PassThru
+          if ($uninstProc.ExitCode -ne 0) {
+            throw "NSIS silent uninstaller returned non-zero exit code: $($uninstProc.ExitCode)"
+          }
+
+          # Verify program executable and shortcuts are removed
+          if (Test-Path "$installDir\EstirahaNext.exe") {
+            throw "Uninstall failed: EstirahaNext.exe still exists in $installDir"
+          }
+          $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Estiraha Next.lnk"
+          if (Test-Path $desktopShortcut) {
+            throw "Uninstall failed: Desktop shortcut still exists at $desktopShortcut"
+          }
+
+          # Verify ALL user data directories & sentinel files remain 100% intact (do NOT delete them)
+          if (-not (Test-Path $dbSentinel) -or -not (Test-Path $cacheSentinel) -or -not (Test-Path $wvSentinel)) {
+            throw "SAFETY VIOLATION: Uninstaller deleted user data sentinel files!"
+          }
+
+          $uninstallReport = @{
+            silentInstallVerified      = $true
+            silentUninstallExitCode    = $uninstProc.ExitCode
+            programBinaryRemoved       = (-not (Test-Path "$installDir\EstirahaNext.exe"))
+            userAppDataSentinelIntact  = (Test-Path $dbSentinel)
+            userCacheSentinelIntact    = (Test-Path $cacheSentinel)
+            webviewProfileIntact       = (Test-Path $wvSentinel)
+            verifiedAtUtc              = (Get-Date).ToUniversalTime().ToString("o")
+          }
+          $uninstallReportPath = Join-Path (Get-Location) "artifacts\phase1a-installer-report.json"
+          $uninstallReport | ConvertTo-Json -Depth 4 | Set-Content -Path $uninstallReportPath -Encoding UTF8
+          Write-Host ($uninstallReport | ConvertTo-Json -Depth 4)
+
+      - name: Upload Windows Installer, Live Window Screenshot & Smoke/Installer Reports
         uses: actions/upload-artifact@v4
         with:
           name: EstirahaNext-Phase1A-Windows-PoC-Evidence
@@ -134,3 +222,4 @@ jobs:
             dist/EstirahaNext-Setup-0.1.0-phase1a-x64.exe
             artifacts/phase1a-windows-window.png
             artifacts/phase1a-smoke-report.json
+            artifacts/phase1a-installer-report.json
