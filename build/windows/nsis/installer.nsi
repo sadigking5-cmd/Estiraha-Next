@@ -13,7 +13,7 @@
 !define APP_EXE "EstirahaNext.exe"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "..\..\dist\EstirahaNext-Setup-${APP_VERSION}-x64.exe"
+OutFile "..\..\..\dist\EstirahaNext-Setup-${APP_VERSION}-x64.exe"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 RequestExecutionLevel admin
 Unicode True
@@ -25,7 +25,7 @@ UninstPage instfiles
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File "..\..\dist\windows-amd64\${APP_EXE}"
+File "..\..\..\dist\windows-amd64\${APP_EXE}"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
