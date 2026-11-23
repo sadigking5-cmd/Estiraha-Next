@@ -112,25 +112,189 @@ jobs:
           $reportPath = Join-Path (Get-Location) "artifacts\phase1a-smoke-report.json"
           $shotPath   = Join-Path (Get-Location) "artifacts\phase1a-windows-window.png"
 
-          $proc = Start-Process -FilePath "C:\EstirahaPoCInstall\EstirahaNext.exe" `
-            -ArgumentList "--poc-smoke-report", $reportPath, "--poc-hold-ms", "5000" `
-            -PassThru
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          using System.Text;
 
-          Start-Sleep -Milliseconds 2800
+          public static class Win32WindowHelper {
+              public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
-          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-          $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-          $gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bmp.Save($shotPath, [System.Drawing.Imaging.ImageFormat]::Png)
-          $gfx.Dispose()
-          $bmp.Dispose()
+              [DllImport("kernel32.dll")]
+              public static extern IntPtr GetConsoleWindow();
 
-          if (-not $proc.WaitForExit(20000)) {
-            $proc.Kill()
-            throw "EstirahaNext.exe did not exit cleanly within 20s timeout"
+              [DllImport("user32.dll")]
+              public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+              [DllImport("user32.dll")]
+              public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+              public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+              public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+              [DllImport("user32.dll")]
+              public static extern bool IsWindow(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern bool IsWindowVisible(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern bool BringWindowToTop(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern IntPtr GetForegroundWindow();
+
+              [DllImport("kernel32.dll")]
+              public static extern uint GetCurrentThreadId();
+
+              [DllImport("user32.dll")]
+              public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+              public const int SW_MINIMIZE = 6;
+              public const int SW_RESTORE  = 9;
+              public const int SW_SHOW     = 5;
+          }
+          "@
+
+          # 1. Minimize GitHub Runner Console / Terminal windows via Windows API so they never occlude Estiraha
+          $minimizedHandles = New-Object System.Collections.Generic.List[IntPtr]
+          $ownConsole = [Win32WindowHelper]::GetConsoleWindow()
+          if ($ownConsole -ne [IntPtr]::Zero -and [Win32WindowHelper]::IsWindowVisible($ownConsole)) {
+            [void][Win32WindowHelper]::ShowWindow($ownConsole, [Win32WindowHelper]::SW_MINIMIZE)
+            $minimizedHandles.Add($ownConsole)
+          }
+
+          $minCallback = [Win32WindowHelper+EnumWindowsProc]{
+            param($hWnd, $lParam)
+            if (-not [Win32WindowHelper]::IsWindowVisible($hWnd)) { return $true }
+            $clsSb = New-Object System.Text.StringBuilder 256
+            [void][Win32WindowHelper]::GetClassName($hWnd, $clsSb, $clsSb.Capacity)
+            $cls = $clsSb.ToString()
+            $titleSb = New-Object System.Text.StringBuilder 512
+            [void][Win32WindowHelper]::GetWindowText($hWnd, $titleSb, $titleSb.Capacity)
+            $title = $titleSb.ToString()
+
+            if ($cls -eq "CASCADIA_HOSTING_WINDOW_CLASS" -or $cls -eq "ConsoleWindowClass" -or $title -match "GitHub\\Host|Runner\.Listener|pwsh|PowerShell|cmd\.exe") {
+              [void][Win32WindowHelper]::ShowWindow($hWnd, [Win32WindowHelper]::SW_MINIMIZE)
+              $minimizedHandles.Add($hWnd)
+            }
+            return $true
+          }
+          [void][Win32WindowHelper]::EnumWindows($minCallback, [IntPtr]::Zero)
+          Write-Host "Minimized $($minimizedHandles.Count) console/terminal window(s) prior to launch."
+
+          try {
+            # 2. Launch Estiraha Next (hold window open 9000ms so WebView2 settles before Tray cycle)
+            $proc = Start-Process -FilePath "C:\EstirahaPoCInstall\EstirahaNext.exe" `
+              -ArgumentList "--poc-smoke-report", $reportPath, "--poc-hold-ms", "9000" `
+              -PassThru
+
+            # 3. Poll until Estiraha's main HWND is created, visible, and valid
+            $estirahaHwnd = [IntPtr]::Zero
+            $deadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $deadline -and $estirahaHwnd -eq [IntPtr]::Zero) {
+              $proc.Refresh()
+              if ($proc.MainWindowHandle -ne [IntPtr]::Zero -and [Win32WindowHelper]::IsWindow($proc.MainWindowHandle) -and [Win32WindowHelper]::IsWindowVisible($proc.MainWindowHandle)) {
+                $estirahaHwnd = $proc.MainWindowHandle
+                break
+              }
+              $findCallback = [Win32WindowHelper+EnumWindowsProc]{
+                param($hWnd, $lParam)
+                if (-not [Win32WindowHelper]::IsWindowVisible($hWnd)) { return $true }
+                $winPid = [uint32]0
+                [void][Win32WindowHelper]::GetWindowThreadProcessId($hWnd, [ref]$winPid)
+                if ($winPid -eq [uint32]$proc.Id) {
+                  $titleSb = New-Object System.Text.StringBuilder 512
+                  [void][Win32WindowHelper]::GetWindowText($hWnd, $titleSb, $titleSb.Capacity)
+                  if ($titleSb.ToString() -match "Estiraha Next") {
+                    $script:foundHwnd = $hWnd
+                    return $false
+                  }
+                }
+                return $true
+              }
+              $script:foundHwnd = [IntPtr]::Zero
+              [void][Win32WindowHelper]::EnumWindows($findCallback, [IntPtr]::Zero)
+              if ($script:foundHwnd -ne [IntPtr]::Zero -and [Win32WindowHelper]::IsWindow($script:foundHwnd)) {
+                $estirahaHwnd = $script:foundHwnd
+                break
+              }
+              Start-Sleep -Milliseconds 200
+            }
+
+            if ($estirahaHwnd -eq [IntPtr]::Zero -or -not [Win32WindowHelper]::IsWindow($estirahaHwnd)) {
+              throw "Failed to obtain a valid visible HWND for EstirahaNext.exe (PID $($proc.Id))"
+            }
+
+            $winTitleSb = New-Object System.Text.StringBuilder 512
+            [void][Win32WindowHelper]::GetWindowText($estirahaHwnd, $winTitleSb, $winTitleSb.Capacity)
+            Write-Host ("Verified valid Estiraha HWND: 0x{0:X} | Title: '{1}'" -f $estirahaHwnd.ToInt64(), $winTitleSb.ToString())
+
+            # 4. Bring Estiraha HWND to foreground using standard Win32 SetForegroundWindow (NO AlwaysOnTop)
+            [void][Win32WindowHelper]::ShowWindow($estirahaHwnd, [Win32WindowHelper]::SW_RESTORE)
+            $fgHwnd = [Win32WindowHelper]::GetForegroundWindow()
+            $dummyPid = [uint32]0
+            $fgThread = if ($fgHwnd -ne [IntPtr]::Zero) { [Win32WindowHelper]::GetWindowThreadProcessId($fgHwnd, [ref]$dummyPid) } else { [uint32]0 }
+            $targetThread = [Win32WindowHelper]::GetWindowThreadProcessId($estirahaHwnd, [ref]$dummyPid)
+            $curThread = [Win32WindowHelper]::GetCurrentThreadId()
+
+            if ($fgThread -ne 0 -and $fgThread -ne $curThread) {
+              [void][Win32WindowHelper]::AttachThreadInput($curThread, $fgThread, $true)
+            }
+            if ($targetThread -ne 0 -and $targetThread -ne $curThread) {
+              [void][Win32WindowHelper]::AttachThreadInput($curThread, $targetThread, $true)
+            }
+
+            $fgOk = [Win32WindowHelper]::SetForegroundWindow($estirahaHwnd)
+            [void][Win32WindowHelper]::BringWindowToTop($estirahaHwnd)
+
+            if ($targetThread -ne 0 -and $targetThread -ne $curThread) {
+              [void][Win32WindowHelper]::AttachThreadInput($curThread, $targetThread, $false)
+            }
+            if ($fgThread -ne 0 -and $fgThread -ne $curThread) {
+              [void][Win32WindowHelper]::AttachThreadInput($curThread, $fgThread, $false)
+            }
+            Write-Host "SetForegroundWindow result: $fgOk (Active Foreground HWND: 0x$([Win32WindowHelper]::GetForegroundWindow().ToInt64().ToString('X')))"
+
+            # 5. Wait for WebView2 Arabic RTL rendering and RPC diagnostics state to stabilize
+            Start-Sleep -Milliseconds 4200
+
+            # Re-verify HWND is still visible immediately before desktop capture
+            if (-not [Win32WindowHelper]::IsWindowVisible($estirahaHwnd)) {
+              throw "Estiraha HWND became hidden before screenshot capture!"
+            }
+
+            # 6. Capture full real Windows desktop showing Estiraha Arabic RTL UI clearly
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save($shotPath, [System.Drawing.Imaging.ImageFormat]::Png)
+            $gfx.Dispose()
+            $bmp.Dispose()
+
+            if (-not $proc.WaitForExit(25000)) {
+              $proc.Kill()
+              throw "EstirahaNext.exe did not exit cleanly within 25s timeout"
+            }
+          } finally {
+            # Restore minimized console windows cleanly after test completes
+            foreach ($h in $minimizedHandles) {
+              if ([Win32WindowHelper]::IsWindow($h)) {
+                [void][Win32WindowHelper]::ShowWindow($h, [Win32WindowHelper]::SW_RESTORE)
+              }
+            }
           }
 
           Start-Sleep -Seconds 1
