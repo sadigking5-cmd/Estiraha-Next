@@ -142,6 +142,12 @@ jobs:
               public static extern bool IsWindowVisible(IntPtr hWnd);
 
               [DllImport("user32.dll")]
+              public static extern bool IsIconic(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+              [DllImport("user32.dll")]
               public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
               [DllImport("user32.dll")]
@@ -159,9 +165,51 @@ jobs:
               [DllImport("user32.dll")]
               public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
-              public const int SW_MINIMIZE = 6;
-              public const int SW_RESTORE  = 9;
-              public const int SW_SHOW     = 5;
+              public const int  SW_MINIMIZE = 6;
+              public const int  SW_RESTORE  = 9;
+              public const int  SW_SHOW     = 5;
+              public const uint GW_OWNER    = 4;
+
+              public static IntPtr FindMainAppWindow(uint targetPid, out string matchedTitle, out string matchedClass) {
+                  IntPtr result = IntPtr.Zero;
+                  string foundTitle = "";
+                  string foundClass = "";
+
+                  EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+                      if (!IsWindow(hWnd) || !IsWindowVisible(hWnd)) {
+                          return true;
+                      }
+                      uint winPid = 0;
+                      GetWindowThreadProcessId(hWnd, out winPid);
+                      if (winPid != targetPid) {
+                          return true;
+                      }
+                      // Distinguish top-level main application window from owned helper/WebView2 child windows
+                      if (GetWindow(hWnd, GW_OWNER) != IntPtr.Zero) {
+                          return true;
+                      }
+                      StringBuilder clsSb = new StringBuilder(256);
+                      GetClassName(hWnd, clsSb, clsSb.Capacity);
+                      string cls = clsSb.ToString();
+                      if (cls.StartsWith("Chrome_WidgetWin") || cls == "Intermediate D3D Window") {
+                          return true;
+                      }
+                      StringBuilder titleSb = new StringBuilder(512);
+                      GetWindowText(hWnd, titleSb, titleSb.Capacity);
+                      string title = titleSb.ToString();
+                      if (title.Contains("Estiraha Next")) {
+                          result = hWnd;
+                          foundTitle = title;
+                          foundClass = cls;
+                          return false;
+                      }
+                      return true;
+                  }, IntPtr.Zero);
+
+                  matchedTitle = foundTitle;
+                  matchedClass = foundClass;
+                  return result;
+              }
           }
           "@
 
@@ -192,55 +240,68 @@ jobs:
           [void][Win32WindowHelper]::EnumWindows($minCallback, [IntPtr]::Zero)
           Write-Host "Minimized $($minimizedHandles.Count) console/terminal window(s) prior to launch."
 
+          function Format-WindowDiag([System.Diagnostics.Process]$p, [IntPtr]$hWnd) {
+            $hasExited = if ($null -ne $p) { $p.HasExited } else { $true }
+            $pidVal    = if ($null -ne $p) { $p.Id } else { 0 }
+            $isWin     = if ($hWnd -ne [IntPtr]::Zero) { [Win32WindowHelper]::IsWindow($hWnd) } else { $false }
+            $isVis     = if ($isWin) { [Win32WindowHelper]::IsWindowVisible($hWnd) } else { $false }
+            $isIcon    = if ($isWin) { [Win32WindowHelper]::IsIconic($hWnd) } else { $false }
+            $ownerPid  = [uint32]0
+            if ($isWin) { [void][Win32WindowHelper]::GetWindowThreadProcessId($hWnd, [ref]$ownerPid) }
+            $tSb = New-Object System.Text.StringBuilder 512
+            if ($isWin) { [void][Win32WindowHelper]::GetWindowText($hWnd, $tSb, $tSb.Capacity) }
+            $fg = [Win32WindowHelper]::GetForegroundWindow()
+            $fgSb = New-Object System.Text.StringBuilder 512
+            if ($fg -ne [IntPtr]::Zero) { [void][Win32WindowHelper]::GetWindowText($fg, $fgSb, $fgSb.Capacity) }
+            return ("PID={0} HasExited={1} | HWND=0x{2:X} OwnerPID={3} IsWindow={4} IsVisible={5} IsIconic={6} Title='{7}' | ForegroundHWND=0x{8:X} ForegroundTitle='{9}'" -f `
+              $pidVal, $hasExited, $hWnd.ToInt64(), $ownerPid, $isWin, $isVis, $isIcon, $tSb.ToString(), $fg.ToInt64(), $fgSb.ToString())
+          }
+
           try {
-            # 2. Launch Estiraha Next (hold window open 9000ms so WebView2 settles before Tray cycle)
+            # 2. Launch Estiraha Next with safe 30000ms hold budget so screenshot completes well before Tray cycle & Quit
             $proc = Start-Process -FilePath "C:\EstirahaPoCInstall\EstirahaNext.exe" `
-              -ArgumentList "--poc-smoke-report", $reportPath, "--poc-hold-ms", "9000" `
+              -ArgumentList "--poc-smoke-report", $reportPath, "--poc-hold-ms", "30000" `
               -PassThru
 
-            # 3. Poll until Estiraha's main HWND is created, visible, and valid
+            # 3. Fast native EnumWindows polling loop verifying PID ownership, Process.HasExited, IsWindow & IsWindowVisible
             $estirahaHwnd = [IntPtr]::Zero
-            $deadline = (Get-Date).AddSeconds(10)
+            $matchedTitle = ""
+            $matchedClass = ""
+            $deadline = (Get-Date).AddSeconds(15)
             while ((Get-Date) -lt $deadline -and $estirahaHwnd -eq [IntPtr]::Zero) {
-              $proc.Refresh()
-              if ($proc.MainWindowHandle -ne [IntPtr]::Zero -and [Win32WindowHelper]::IsWindow($proc.MainWindowHandle) -and [Win32WindowHelper]::IsWindowVisible($proc.MainWindowHandle)) {
-                $estirahaHwnd = $proc.MainWindowHandle
+              if ($proc.HasExited) {
+                $diagMsg = Format-WindowDiag $proc $estirahaHwnd
+                throw "EstirahaNext.exe exited prematurely (ExitCode=$($proc.ExitCode)) during HWND discovery! $diagMsg"
+              }
+              $candidate = [Win32WindowHelper]::FindMainAppWindow([uint32]$proc.Id, [ref]$matchedTitle, [ref]$matchedClass)
+              if ($candidate -ne [IntPtr]::Zero) {
+                $estirahaHwnd = $candidate
                 break
               }
-              $findCallback = [Win32WindowHelper+EnumWindowsProc]{
-                param($hWnd, $lParam)
-                if (-not [Win32WindowHelper]::IsWindowVisible($hWnd)) { return $true }
-                $winPid = [uint32]0
-                [void][Win32WindowHelper]::GetWindowThreadProcessId($hWnd, [ref]$winPid)
-                if ($winPid -eq [uint32]$proc.Id) {
-                  $titleSb = New-Object System.Text.StringBuilder 512
-                  [void][Win32WindowHelper]::GetWindowText($hWnd, $titleSb, $titleSb.Capacity)
-                  if ($titleSb.ToString() -match "Estiraha Next") {
-                    $script:foundHwnd = $hWnd
-                    return $false
-                  }
-                }
-                return $true
-              }
-              $script:foundHwnd = [IntPtr]::Zero
-              [void][Win32WindowHelper]::EnumWindows($findCallback, [IntPtr]::Zero)
-              if ($script:foundHwnd -ne [IntPtr]::Zero -and [Win32WindowHelper]::IsWindow($script:foundHwnd)) {
-                $estirahaHwnd = $script:foundHwnd
-                break
-              }
-              Start-Sleep -Milliseconds 200
+              Start-Sleep -Milliseconds 150
             }
 
             if ($estirahaHwnd -eq [IntPtr]::Zero -or -not [Win32WindowHelper]::IsWindow($estirahaHwnd)) {
-              throw "Failed to obtain a valid visible HWND for EstirahaNext.exe (PID $($proc.Id))"
+              $diagMsg = Format-WindowDiag $proc $estirahaHwnd
+              throw "Failed to obtain a valid visible main HWND for EstirahaNext.exe within 15s! $diagMsg"
             }
 
-            $winTitleSb = New-Object System.Text.StringBuilder 512
-            [void][Win32WindowHelper]::GetWindowText($estirahaHwnd, $winTitleSb, $winTitleSb.Capacity)
-            Write-Host ("Verified valid Estiraha HWND: 0x{0:X} | Title: '{1}'" -f $estirahaHwnd.ToInt64(), $winTitleSb.ToString())
+            $verifiedPid = [uint32]0
+            [void][Win32WindowHelper]::GetWindowThreadProcessId($estirahaHwnd, [ref]$verifiedPid)
+            if ($verifiedPid -ne [uint32]$proc.Id) {
+              $diagMsg = Format-WindowDiag $proc $estirahaHwnd
+              throw "HWND PID ownership mismatch! Expected PID $($proc.Id), got $verifiedPid. $diagMsg"
+            }
 
-            # 4. Bring Estiraha HWND to foreground using standard Win32 SetForegroundWindow (NO AlwaysOnTop)
-            [void][Win32WindowHelper]::ShowWindow($estirahaHwnd, [Win32WindowHelper]::SW_RESTORE)
+            Write-Host ("Verified valid Estiraha main HWND: 0x{0:X} | PID: {1} | Class: '{2}' | Title: '{3}'" -f `
+              $estirahaHwnd.ToInt64(), $verifiedPid, $matchedClass, $matchedTitle)
+
+            # 4. Restore ONLY if minimized (IsIconic), then foreground via SetForegroundWindow & BringWindowToTop (NO AlwaysOnTop)
+            if ([Win32WindowHelper]::IsIconic($estirahaHwnd)) {
+              Write-Host "Estiraha HWND was iconic (minimized); restoring via SW_RESTORE..."
+              [void][Win32WindowHelper]::ShowWindow($estirahaHwnd, [Win32WindowHelper]::SW_RESTORE)
+            }
+
             $fgHwnd = [Win32WindowHelper]::GetForegroundWindow()
             $dummyPid = [uint32]0
             $fgThread = if ($fgHwnd -ne [IntPtr]::Zero) { [Win32WindowHelper]::GetWindowThreadProcessId($fgHwnd, [ref]$dummyPid) } else { [uint32]0 }
@@ -263,17 +324,27 @@ jobs:
             if ($fgThread -ne 0 -and $fgThread -ne $curThread) {
               [void][Win32WindowHelper]::AttachThreadInput($curThread, $fgThread, $false)
             }
-            Write-Host "SetForegroundWindow result: $fgOk (Active Foreground HWND: 0x$([Win32WindowHelper]::GetForegroundWindow().ToInt64().ToString('X')))"
+            Write-Host ("SetForegroundWindow result: {0} | {1}" -f $fgOk, (Format-WindowDiag $proc $estirahaHwnd))
 
-            # 5. Wait for WebView2 Arabic RTL rendering and RPC diagnostics state to stabilize
-            Start-Sleep -Milliseconds 4200
+            # 5. Wait 3500ms for WebView2 surface and Arabic RTL UI + Go RPC state to settle
+            Start-Sleep -Milliseconds 3500
 
-            # Re-verify HWND is still visible immediately before desktop capture
-            if (-not [Win32WindowHelper]::IsWindowVisible($estirahaHwnd)) {
-              throw "Estiraha HWND became hidden before screenshot capture!"
+            # 6. Re-verify process liveness, HWND validity, PID ownership, non-iconic & visibility immediately before capture
+            $recheckPid = [uint32]0
+            if ([Win32WindowHelper]::IsWindow($estirahaHwnd)) {
+              [void][Win32WindowHelper]::GetWindowThreadProcessId($estirahaHwnd, [ref]$recheckPid)
             }
+            if ($proc.HasExited -or `
+                -not [Win32WindowHelper]::IsWindow($estirahaHwnd) -or `
+                -not [Win32WindowHelper]::IsWindowVisible($estirahaHwnd) -or `
+                [Win32WindowHelper]::IsIconic($estirahaHwnd) -or `
+                $recheckPid -ne [uint32]$proc.Id) {
+              $diagMsg = Format-WindowDiag $proc $estirahaHwnd
+              throw "Pre-screenshot HWND/process validation failed! $diagMsg"
+            }
+            Write-Host ("Pre-capture state confirmed OK: {0}" -f (Format-WindowDiag $proc $estirahaHwnd))
 
-            # 6. Capture full real Windows desktop showing Estiraha Arabic RTL UI clearly
+            # 7. Capture full real Windows desktop showing Estiraha Arabic RTL UI clearly
             Add-Type -AssemblyName System.Windows.Forms
             Add-Type -AssemblyName System.Drawing
             $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -284,9 +355,10 @@ jobs:
             $gfx.Dispose()
             $bmp.Dispose()
 
-            if (-not $proc.WaitForExit(25000)) {
+            if (-not $proc.WaitForExit(45000)) {
               $proc.Kill()
-              throw "EstirahaNext.exe did not exit cleanly within 25s timeout"
+              $diagMsg = Format-WindowDiag $proc $estirahaHwnd
+              throw "EstirahaNext.exe did not exit cleanly within 45000ms timeout! $diagMsg"
             }
           } finally {
             # Restore minimized console windows cleanly after test completes
