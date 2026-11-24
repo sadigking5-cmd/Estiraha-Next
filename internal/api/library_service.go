@@ -444,6 +444,7 @@ func (s *LibraryService) ListOperationJournal(batchID string) ([]organizer.Journ
 func (s *LibraryService) RefreshAndListHealthIssues(kindFilter string) ([]reports.HealthIssueView, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	_, _, _ = s.libSvc.RefreshConnectivity(ctx)
 	if _, err := s.reportSvc.GenerateHealthReport(ctx); err != nil {
 		return nil, err
 	}

@@ -2,7 +2,7 @@
   "app": {
     "name": "Estiraha Next",
     "code_name": "estiraha-next",
-    "version": "0.1.0-phase0",
+    "version": "0.2.0-phase-b",
     "default_language": "ar",
     "supported_languages": ["ar", "en"],
     "theme": "dark",

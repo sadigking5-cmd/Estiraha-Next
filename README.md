@@ -1,35 +1,30 @@
-# Estiraha Next — Windows Desktop Media Library System
+# Estiraha Next — Windows Desktop Media Library Management System
 
-**Estiraha Next** is a native, offline-first **Windows Desktop** media library indexing, organization, deduplication, artwork, subtitle, watch-tracking, and playback platform engineered in **Go + Wails v3 (PoC-gated) + React/TypeScript + SQLite 3 (FTS5)**.
+**Estiraha Next (استراحة نكست)** is a native, offline-first **Windows 10/11 (x64) Desktop** media library indexing, organization, deduplication, subtitle, health-reporting, watch-tracking, and integrated playback application built with **Go 1.27.4 + Wails v3.1.0 + React 18 + TypeScript + SQLite 3 (WAL + Foreign Keys + Bilingual FTS5) + Windows Credential Manager + NSIS**.
 
-> **Important Scope Notice:** Estiraha Next is a locally installed Windows desktop system (`NSIS .exe`) built to handle **200,000+ local media files** across multiple physical drives. It is **not** a cloud web application.
+> **Scope Notice:** Estiraha Next is a locally installed Windows desktop application (`EstirahaNext-Setup-0.2.0-phase-b-x64.exe`). It is **not** a web or cloud service.
 
-## Official Repository
-- **GitHub (Single Source of Truth):** `https://github.com/sadigking5-cmd/Estiraha-Next.git`
-- **Active Branch:** `main`
-- **Current Milestone:** **Phase 0 — Official Project Foundation (Completed)**
+## Official Repository & Branches
+- **Repository:** `https://github.com/sadigking5-cmd/Estiraha-Next.git`
+- **Active Phase B Branch:** `phase-b/media-library-system` (`v0.2.0-phase-b`)
+- **Phase 1A Verified PoC Branch:** `phase1a/wails-v3-poc`
 
-## Core Capabilities (Target Architecture)
-- **12 Supported Media Categories:** Movies, Series, TV Programs, Talk Shows, Game Shows, Sports, Entertainment, Standalone Documentaries, Documentary Series, Anime, Cartoons, and Cinematic Franchises & Celebrity Filmographies.
-- **Deterministic Naming Engine:** Strict enforcement of `Movie Name YYYY` (no brackets/tags/dots), yearless Series roots (`S01/01.mp4`), yearless Franchise roots, and `الاسم بالعربية (English Name)` Celebrity profiles without physical file duplication.
-- **Zero-Risk Review Center:** Side-by-side before/after path previews, inline edits, exclusions, zero automatic moves/deletes, zero file overwrites, power-loss `operation_journal` recovery, reversible `rollback_steps`, and manual-empty Trash.
-- **Quality & SHA-256 Deduplication:** Stream quality ranking, exact SHA-256 content duplicate detection vs. alternate-quality versions, and cross-disk `Keep` preservation.
-- **API Hub & Smart Image Engine:** Isolated provider adapters with confidence/conflict tracking, Windows Credential Manager secret protection, and a 2 GiB LRU image cache (JPEG/PNG/WebP verified; SVG blocked; user local artwork protected).
-- **Bilingual Offline-First UX:** Instant local SQLite FTS5 search in Arabic (`RTL` — right sidebar) and English (`LTR` — left sidebar).
+## Completed Features (Phase B — Sub-Phases B1–B12)
+1. **Multi-Disk Storage & Manual Scanner (B1):** Register drives & roots by content type, reject duplicate/overlapping roots, preserve offline drive catalogs safely, passive folder-change indicators, and strictly **Manual** scan execution with safe cancellation.
+2. **Multi-Signal Media Identification (B2):** Combines folder layout, category, `SxxExx`/Season patterns, Arabic script detection, companion file linking, and optional TMDb lookup; routes uncertain items to Review (`Unidentified Files = Review`).
+3. **Movie Library & Series/Episodes Management (B3 & B4):** Instant bilingual Arabic/English FTS5 search, multi-version inspection, manual metadata editing (`locked_by_user`), yearless Series folders (`Series Name/S01/01.mp4`), and missing season/episode gap detection.
+4. **Canonical Naming & Mandatory `.shorts` Law (B5):** Enforces `Movie Name YYYY` (no parentheses or release tags; authentic Arabic preserved without speculative translation) and strictly protects `.shorts` companion files from stripping, deletion, or conversion.
+5. **Duplicates & Best-Version Selection (B6):** Multi-factor quality scoring (resolution + codec + HDR + integrity + size density) while preserving copies across separate drives (`Cross-Disk Copies = Keep`).
+6. **Smart Review Center, Safe Organizer & 1-Click Rollback (B7 & B8):** Zero file moves/renames without explicit user approval, automatic verified `pre_batch` SQLite backup (`VACUUM INTO` + `PRAGMA integrity_check` + `SHA-256` + JSON manifest), zero overwrites, post-move `SHA-256` verification, immutable UUID retention, and 1-click `RollbackBatch`.
+7. **Missing Items & Health Reports (B9):** Unified reporting across missing episodes, missing seasons, missing subtitles, missing posters, incomplete metadata, unidentified files, 0-byte/corrupted files, same-disk duplicates, and offline drives.
+8. **Integrated Media Player & Watch Tracking (B10):** Loopback (`127.0.0.1:0`) HTTP Byte-Range video streaming, on-the-fly UTF-8 `SRT`/`ASS` -> `WebVTT` subtitle conversion, local poster serving (SVG blocked), resume position tracking, and optional external player fallback.
+9. **Hybrid Cinematic + Administrative Bilingual UI (B11):** 10 complete workspaces with automatic directional layout (`Arabic RTL` right-sidebar / `English LTR` left-sidebar) and System Tray integration.
 
-## Essential Governance & Continuity Documents
-1. [`PROJECT_STATUS.md`](./PROJECT_STATUS.md) — Current milestone status & verification checklist
-2. [`HANDOFF.md`](./HANDOFF.md) — Cross-account Genspark onboarding & continuity protocol
-3. [`PROJECT_SPEC.md`](./PROJECT_SPEC.md) — Complete functional specification
-4. [`ARCHITECTURE.md`](./ARCHITECTURE.md) — System & 37-package modular design
-5. [`DATABASE_SCHEMA.md`](./DATABASE_SCHEMA.md) — SQLite 3 + FTS5 tables, constraints & ER diagram
-6. [`NAMING_RULES.md`](./NAMING_RULES.md) — Mandatory naming conventions
-7. [`SAFETY_RULES.md`](./SAFETY_RULES.md) — 12 non-negotiable file protection laws
-8. [`DECISIONS.md`](./DECISIONS.md) — Confirmed ADRs & open PoC/license gates
-9. [`ROADMAP.md`](./ROADMAP.md) — Phased implementation plan
-10. [`TEST_PLAN.md`](./TEST_PLAN.md) — Module-by-module test matrix
-
-## Quick Foundation Verification
+## Verification & Windows Build Commands
 ```bash
+# Run full TypeScript/Vite build, Linux & Windows Go vet, Unit + Phase B E2E tests, and CLI self-check
 bash scripts/verify_foundation.sh
+
+# Cross-compile Windows x64 EstirahaNext.exe and package NSIS Setup .exe
+bash scripts/build_windows_poc.sh
 ```

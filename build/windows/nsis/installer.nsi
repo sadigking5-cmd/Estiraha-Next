@@ -9,7 +9,7 @@
 
 !define APP_NAME "Estiraha Next"
 !define APP_PUBLISHER "Estiraha Engineering"
-!define APP_VERSION "0.1.0-phase1a"
+!define APP_VERSION "0.2.0-phase-b"
 !define APP_EXE "EstirahaNext.exe"
 
 Name "${APP_NAME} ${APP_VERSION}"

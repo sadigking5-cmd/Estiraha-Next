@@ -31,4 +31,4 @@ if [ "$WV_EXIT" -ne 78 ]; then
   exit 1
 fi
 
-echo "==> All Phase 0 + Phase 1A Verification Checks PASSED."
+echo "==> All Phase 0 + Phase 1A + Phase B Verification Checks PASSED."

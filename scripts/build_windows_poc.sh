@@ -20,5 +20,5 @@ echo "==> [3/4] Packaging NSIS Windows Installer (.exe)..."
 makensis build/windows/nsis/installer.nsi
 
 echo "==> [4/4] Verifying Output Artifacts..."
-ls -lh dist/windows-amd64/EstirahaNext.exe dist/EstirahaNext-Setup-0.1.0-phase1a-x64.exe
-file dist/windows-amd64/EstirahaNext.exe dist/EstirahaNext-Setup-0.1.0-phase1a-x64.exe
+ls -lh dist/windows-amd64/EstirahaNext.exe dist/EstirahaNext-Setup-0.2.0-phase-b-x64.exe
+file dist/windows-amd64/EstirahaNext.exe dist/EstirahaNext-Setup-0.2.0-phase-b-x64.exe
