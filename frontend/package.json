@@ -1,7 +1,7 @@
 {
   "name": "estiraha-next-frontend",
   "private": true,
-  "version": "0.1.0-phase1a",
+  "version": "0.2.0-phase-b",
   "description": "Estiraha Next — Windows Desktop Media Library UI Layer (Wails v3 + React + TypeScript)",
   "type": "module",
   "scripts": {
