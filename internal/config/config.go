@@ -82,7 +82,7 @@ func Default() Config {
 		App: AppConfig{
 			Name:               "Estiraha Next",
 			CodeName:           "estiraha-next",
-			Version:            "0.1.0-phase0",
+			Version:            "0.2.0-phase-b",
 			DefaultLanguage:    "ar",
 			SupportedLanguages: []string{"ar", "en"},
 			Theme:              "dark",

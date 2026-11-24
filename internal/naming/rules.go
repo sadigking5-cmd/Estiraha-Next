@@ -5,6 +5,7 @@ package naming
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -141,4 +142,130 @@ func PlanProgramNaming(originalName string, isKnownProgram bool) (ProgramHandlin
 		AllowAutoSeasons:   true,
 		RouteToReviewQueue: false,
 	}, nil
+}
+
+// CompanionFilePlan represents a planned canonical name for an associated file
+// (video, subtitle, poster, or mandatory preserved .shorts companion).
+type CompanionFilePlan struct {
+	OriginalFilename string `json:"originalFilename"`
+	Extension        string `json:"extension"`
+	FileKind         string `json:"fileKind"`
+	ProposedFilename string `json:"proposedFilename"`
+	ProtectedShorts  bool   `json:"protectedShorts"`
+}
+
+// ExtractLanguageSuffix detects an ISO language tag before the final extension.
+func ExtractLanguageSuffix(filename string) string {
+	base := strings.TrimSpace(filename)
+	ext := filepath.Ext(base)
+	if ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	sub := strings.ToLower(filepath.Ext(base))
+	switch sub {
+	case ".ar", ".ara", ".arabic":
+		return ".ar"
+	case ".en", ".eng", ".english":
+		return ".en"
+	case ".fr", ".fre":
+		return ".fr"
+	default:
+		return ""
+	}
+}
+
+// IsShortsExtension enforces the non-negotiable Phase B `.shorts` law:
+// `.shorts` is an officially recognized and protected companion extension.
+func IsShortsExtension(filenameOrExt string) bool {
+	s := strings.ToLower(strings.TrimSpace(filenameOrExt))
+	return s == ".shorts" || strings.HasSuffix(s, ".shorts")
+}
+
+// PlanMovieBundle plans canonical folder ("Movie Name YYYY") and companion filenames.
+func PlanMovieBundle(title string, year int, companions []CompanionFilePlan, multiSubtitle bool) (string, []CompanionFilePlan, error) {
+	stem, err := FormatMovieName(title, year)
+	if err != nil {
+		return "", nil, err
+	}
+	out := make([]CompanionFilePlan, 0, len(companions))
+	for _, c := range companions {
+		ext := strings.ToLower(strings.TrimSpace(c.Extension))
+		if IsShortsExtension(c.OriginalFilename) || IsShortsExtension(ext) {
+			out = append(out, CompanionFilePlan{
+				OriginalFilename: c.OriginalFilename,
+				Extension:        ".shorts",
+				FileKind:         "shorts",
+				ProposedFilename: stem + ".shorts",
+				ProtectedShorts:  true,
+			})
+			continue
+		}
+		if ext == "" {
+			ext = strings.ToLower(filepath.Ext(c.OriginalFilename))
+		}
+		proposed := stem + ext
+		if c.FileKind == "subtitle" && multiSubtitle {
+			if lang := ExtractLanguageSuffix(c.OriginalFilename); lang != "" {
+				proposed = stem + lang + ext
+			}
+		}
+		out = append(out, CompanionFilePlan{
+			OriginalFilename: c.OriginalFilename,
+			Extension:        ext,
+			FileKind:         c.FileKind,
+			ProposedFilename: proposed,
+			ProtectedShorts:  false,
+		})
+	}
+	return stem, out, nil
+}
+
+// PlanEpisodeBundle plans canonical series/season/episode paths ("Series Name/S01/01.mp4").
+func PlanEpisodeBundle(seriesTitle string, seasonNum, episodeNum int, companions []CompanionFilePlan, multiSubtitle bool) (string, string, []CompanionFilePlan, error) {
+	seriesFolder, err := FormatSeriesFolder(seriesTitle)
+	if err != nil {
+		return "", "", nil, err
+	}
+	seasonFolder, err := FormatSeasonFolder(seasonNum)
+	if err != nil {
+		return "", "", nil, err
+	}
+	out := make([]CompanionFilePlan, 0, len(companions))
+	for _, c := range companions {
+		ext := strings.ToLower(strings.TrimSpace(c.Extension))
+		if IsShortsExtension(c.OriginalFilename) || IsShortsExtension(ext) {
+			epShorts, err := FormatEpisodeFile(episodeNum, ".shorts")
+			if err != nil {
+				return "", "", nil, err
+			}
+			out = append(out, CompanionFilePlan{
+				OriginalFilename: c.OriginalFilename,
+				Extension:        ".shorts",
+				FileKind:         "shorts",
+				ProposedFilename: epShorts,
+				ProtectedShorts:  true,
+			})
+			continue
+		}
+		if ext == "" {
+			ext = strings.ToLower(filepath.Ext(c.OriginalFilename))
+		}
+		epFile, err := FormatEpisodeFile(episodeNum, ext)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if c.FileKind == "subtitle" && multiSubtitle {
+			if lang := ExtractLanguageSuffix(c.OriginalFilename); lang != "" {
+				epFile = fmt.Sprintf("%02d%s%s", episodeNum, lang, ext)
+			}
+		}
+		out = append(out, CompanionFilePlan{
+			OriginalFilename: c.OriginalFilename,
+			Extension:        ext,
+			FileKind:         c.FileKind,
+			ProposedFilename: epFile,
+			ProtectedShorts:  false,
+		})
+	}
+	return seriesFolder, seasonFolder, out, nil
 }

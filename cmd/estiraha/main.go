@@ -99,7 +99,7 @@ func runSelfCheck(cfg config.Config, simMissingWV2 bool) {
 	summary := map[string]any{
 		"app":                cfg.App.Name,
 		"version":            cfg.App.Version,
-		"phase":              "Phase 1A — Windows Desktop Wails v3 PoC",
+		"phase":              "Phase B — Full Media Library Management System",
 		"go_version":         runtime.Version(),
 		"wails_version":      api.WailsRuntimeVersion,
 		"os":                 runtime.GOOS,

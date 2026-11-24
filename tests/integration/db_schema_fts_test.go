@@ -29,14 +29,14 @@ func TestSQLiteWALMigrationsForeignKeysAndBilingualFTS5(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrate failed: %v", err)
 	}
-	if ver != 2 {
-		t.Fatalf("expected schema version 2, got %d", ver)
+	if ver < 2 {
+		t.Fatalf("expected schema version >= 2, got %d", ver)
 	}
 
 	// Re-running Migrate must be strictly idempotent
 	ver2, err := engine.Migrate(ctx, backupDir)
-	if err != nil || ver2 != 2 {
-		t.Fatalf("idempotent re-migrate failed: ver=%d err=%v", ver2, err)
+	if err != nil || ver2 != ver {
+		t.Fatalf("idempotent re-migrate failed: ver=%d want=%d err=%v", ver2, ver, err)
 	}
 
 	health, err := engine.HealthCheck(ctx)

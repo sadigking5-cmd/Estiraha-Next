@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -54,6 +55,20 @@ func (c *wailsDesktopController) EmitEvent(name string, payload any) {
 	}
 }
 
+func (c *wailsDesktopController) PickDirectory() (string, error) {
+	if c.wailsApp == nil {
+		return "", fmt.Errorf("wails application not initialized")
+	}
+	dlg := c.wailsApp.Dialog.OpenFile().
+		SetTitle("اختر مجلد مكتبة الوسائط — Select Media Library Folder").
+		CanChooseDirectories(true).
+		CanChooseFiles(false)
+	if c.mainWin != nil {
+		dlg.AttachToWindow(c.mainWin)
+	}
+	return dlg.PromptForSingleSelection()
+}
+
 func (c *wailsDesktopController) RequestQuit() {
 	c.quitOnce.Do(func() {
 		if c.sysTray != nil {
@@ -69,16 +84,35 @@ func (c *wailsDesktopController) RequestQuit() {
 }
 
 type pocSmokeReport struct {
-	Success               bool                  `json:"success"`
-	TimestampUTC          string                `json:"timestampUtc"`
+	Success               bool                    `json:"success"`
+	TimestampUTC          string                  `json:"timestampUtc"`
 	Diagnostics           api.PlatformDiagnostics `json:"diagnostics"`
-	BridgePing            api.BridgePingResponse `json:"bridgePing"`
-	CredentialManagerTest secrets.ProbeReport   `json:"credentialManagerTest"`
-	TrayAfterCycle        tray.Snapshot         `json:"trayAfterCycle"`
+	BridgePing            api.BridgePingResponse  `json:"bridgePing"`
+	CredentialManagerTest secrets.ProbeReport     `json:"credentialManagerTest"`
+	TrayAfterCycle        tray.Snapshot           `json:"trayAfterCycle"`
+}
+
+func resolveAppDataPaths(isSmokeMode bool) (dbPath string, backupDir string, err error) {
+	if isSmokeMode {
+		return ":memory:", "", nil
+	}
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		home, hErr := os.UserHomeDir()
+		if hErr != nil {
+			return "", "", hErr
+		}
+		base = filepath.Join(home, "AppData", "Local")
+	}
+	appDir := filepath.Join(base, "EstirahaNext")
+	backupDir = filepath.Join(appDir, "Backups")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return "", "", err
+	}
+	return filepath.Join(appDir, "library.sqlite"), backupDir, nil
 }
 
 func runDesktopApp(cfg config.Config, opts launchOptions) int {
-	// 1. Pre-flight check for Microsoft Edge WebView2 Runtime
 	wvStatus := app.DetectWebView2(opts.simulateMissingWebView2)
 	if !wvStatus.Available {
 		if opts.smokeReportPath != "" {
@@ -91,19 +125,23 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 		return app.ExitCodeMissingWebView2
 	}
 
-	// 2. Initialize isolated in-memory Phase 0 SQLite schema for PoC diagnostics
-	// (Strictly obeys Phase 1A constraint: zero new migrations, zero user disk touches)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	dbPath, backupDir, pathErr := resolveAppDataPaths(opts.smokeReportPath != "")
+	if pathErr != nil {
+		fmt.Fprintf(os.Stderr, "appdata path error: %v\n", pathErr)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	dbEngine, err := db.Open(ctx, ":memory:")
+	dbEngine, err := db.Open(ctx, dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "db open failed: %v\n", err)
 		return 1
 	}
 	defer dbEngine.Close()
 
-	if _, err := dbEngine.Migrate(ctx, ""); err != nil {
+	if _, err := dbEngine.Migrate(ctx, backupDir); err != nil {
 		fmt.Fprintf(os.Stderr, "db migrate failed: %v\n", err)
 		return 1
 	}
@@ -112,6 +150,8 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 	trayTracker := tray.NewStateTracker()
 	ctrl := &wailsDesktopController{trayTracker: trayTracker}
 	pocSvc := api.NewPoCService(cfg, dbEngine, vault, trayTracker, wvStatus, ctrl)
+	libSvc := api.NewLibraryService(cfg, dbEngine, vault, backupDir, ctrl)
+	defer libSvc.Close()
 
 	assetsFS, err := frontend.DistFS()
 	if err != nil {
@@ -123,10 +163,11 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 
 	wailsApp := application.New(application.Options{
 		Name:        "Estiraha Next",
-		Description: "Estiraha Next — Windows Desktop Media Library System (Phase 1A PoC)",
+		Description: "Estiraha Next — Windows Desktop Media Library Management System",
 		Icon:        iconBytes,
 		Services: []application.Service{
 			application.NewService(pocSvc),
+			application.NewService(libSvc),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assetsFS),
@@ -135,6 +176,7 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 			DisableQuitOnLastWindowClosed: true,
 		},
 		OnShutdown: func() {
+			_ = libSvc.Close()
 			if ctrl.sysTray != nil {
 				ctrl.sysTray.Destroy()
 			}
@@ -144,26 +186,23 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 	})
 	ctrl.wailsApp = wailsApp
 
-	// Create real Windows WebView2 desktop window
 	mainWin := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "estiraha-main",
-		Title:            "Estiraha Next — استراحة نكست (Phase 1A Desktop PoC)",
-		Width:            1240,
-		Height:           820,
-		MinWidth:         960,
-		MinHeight:        640,
-		BackgroundColour: application.NewRGBA(11, 17, 32, 255),
+		Title:            "Estiraha Next — استراحة نكست | نظام إدارة المكتبات السينمائية",
+		Width:            1360,
+		Height:           860,
+		MinWidth:         1024,
+		MinHeight:        680,
+		BackgroundColour: application.NewRGBA(9, 13, 24, 255),
 		URL:              "/",
 	})
 	ctrl.mainWin = mainWin
 
-	// Intercept window close button (X) to hide cleanly into System Tray instead of orphaning state
 	mainWin.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
 		ctrl.HideToTray()
 		e.Cancel()
 	})
 
-	// Configure native Windows System Tray & bilingual context menu
 	sysTray := wailsApp.SystemTray.New()
 	sysTray.SetIcon(iconBytes)
 	sysTray.SetTooltip("Estiraha Next — استراحة نكست")
@@ -191,7 +230,6 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 	trayTracker.MarkInitialized()
 	ctrl.sysTray = sysTray
 
-	// Listen for client-emitted events (React -> Go Event Bus verification)
 	wailsApp.Event.On("estiraha:react-event", func(ev *application.CustomEvent) {
 		wailsApp.Event.Emit("estiraha:go-event-ack", map[string]any{
 			"receivedEvent": ev.Name,
@@ -200,14 +238,12 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 		})
 	})
 
-	// Optional automated Windows Runner smoke-test orchestration
 	if opts.smokeReportPath != "" {
 		go func() {
 			hold := time.Duration(opts.holdMs) * time.Millisecond
 			if hold < 2000*time.Millisecond {
 				hold = 2000 * time.Millisecond
 			}
-			// Wait for native HWND + WebView2 surface render so external screenshot captures live UI
 			time.Sleep(hold)
 
 			ping := pocSvc.PingGoFromReact(api.BridgePingRequest{
@@ -215,8 +251,8 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 				Locale:  "ar",
 			})
 			credReport, credErr := pocSvc.TestCredentialManager()
+			overview, ovErr := libSvc.GetSystemOverview()
 
-			// Exercise real System Tray hide & restore on the live Windows HWND
 			pocSvc.HideWindowToTray()
 			time.Sleep(400 * time.Millisecond)
 			traySnap := pocSvc.RestoreWindowFromTray()
@@ -224,7 +260,7 @@ func runDesktopApp(cfg config.Config, opts launchOptions) int {
 
 			diag, diagErr := pocSvc.GetPlatformDiagnostics()
 			report := pocSmokeReport{
-				Success:               credErr == nil && diagErr == nil && credReport.ConfirmedPurged && traySnap.HideCount >= 1 && traySnap.RestoreCount >= 1,
+				Success:               credErr == nil && diagErr == nil && ovErr == nil && len(overview.ActivePolicies) >= 15 && credReport.ConfirmedPurged && traySnap.HideCount >= 1 && traySnap.RestoreCount >= 1,
 				TimestampUTC:          time.Now().UTC().Format(time.RFC3339),
 				Diagnostics:           diag,
 				BridgePing:            ping,
