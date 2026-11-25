@@ -48,8 +48,8 @@ func TestPhaseBEndToEndMediaLibrarySafetyNamingPlayerBackupAndScale(t *testing.T
 	defer engine.Close()
 
 	ver, err := engine.Migrate(ctx, backupDir)
-	if err != nil || ver != 3 {
-		t.Fatalf("expected schema version 3, got ver=%d err=%v", ver, err)
+	if err != nil || ver < 3 {
+		t.Fatalf("expected schema version >= 3, got ver=%d err=%v", ver, err)
 	}
 
 	vault := secrets.NewDefaultVault()

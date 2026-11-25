@@ -81,7 +81,12 @@ func (s *Service) IdentifyLibrary(ctx context.Context) (IdentificationSummary, e
 		       mf.relative_path, mf.parent_rel_path, mf.filename, mf.extension
 		FROM media_files mf
 		LEFT JOIN library_roots lr ON lr.id = mf.root_id
-		WHERE mf.file_kind = 'video' AND mf.presence_status = 'present' AND mf.work_id IS NULL
+		WHERE mf.file_kind = 'video'
+		  AND mf.presence_status = 'present'
+		  AND mf.work_id IS NULL
+		  AND mf.is_sample_clip = 0
+		  AND mf.is_apple_double = 0
+		  AND mf.anomaly_category NOT IN ('zero_byte_files', 'samples_and_short_clips', 'auxiliary_or_unknown')
 		ORDER BY mf.relative_path ASC
 	`)
 	if err != nil {
@@ -406,7 +411,14 @@ func (s *Service) linkCompanionsInFolder(ctx context.Context, v rawVideoRow, wor
 	rows, err := s.sqlDB.QueryContext(ctx, `
 		SELECT id, filename, extension, file_kind, size_bytes, relative_path
 		FROM media_files
-		WHERE disk_id = ? AND parent_rel_path = ? AND id != ? AND presence_status = 'present' AND file_kind != 'video'
+		WHERE disk_id = ?
+		  AND parent_rel_path = ?
+		  AND id != ?
+		  AND presence_status = 'present'
+		  AND file_kind != 'video'
+		  AND is_apple_double = 0
+		  AND is_system_artifact = 0
+		  AND anomaly_category NOT IN ('zero_byte_files', 'auxiliary_or_unknown', 'samples_and_short_clips')
 	`, v.diskID, v.parentRel, v.fileID)
 	if err != nil {
 		return 0
