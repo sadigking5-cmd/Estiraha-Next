@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,16 +18,26 @@ import (
 
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/domain"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/naming"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/scanner"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/secrets"
 )
 
 var (
-	sxxExxRegex     = regexp.MustCompile(`(?i)\bS(\d{1,2})[\s._-]*E(\d{1,3})\b`)
-	arabicEpRegex   = regexp.MustCompile(`(?:الحلقة|حلقة|ep|episode)[\s._-]*(\d{1,3})`)
-	seasonDirRegex  = regexp.MustCompile(`(?i)^(?:s|season|الموسم|موسم)[\s._-]*(\d{1,2})$`)
-	bareEpStemRegex = regexp.MustCompile(`^(\d{1,3})$`)
-	yearTokenRegex  = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
+	sxxExxRegex        = regexp.MustCompile(`(?i)\bS(\d{1,2})[\s._-]*E(\d{1,3})\b`)
+	arabicEpRegex      = regexp.MustCompile(`(?:الحلقة|حلقة|ep|episode)[\s._-]*(\d{1,3})`)
+	seasonDirRegex     = regexp.MustCompile(`(?i)^(?:s|season|الموسم|موسم)[\s._-]*(\d{1,2})$`)
+	bareEpStemRegex    = regexp.MustCompile(`^(\d{1,3})$`)
+	yearTokenRegex     = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
+	promoImageBannerRe = regexp.MustCompile(`(?i)(?:^|[\s._\-\[\(])(?:www\.|http|yify|yts|usabit|rarbg|torrent|torrents|demonoid|1337x|extratorrent|kickass|piratebay|ettv|eztv|ganool|arabseed|akwam|mycima|cima4u|egybest)(?:[\s._\-\]\)]|$|\.)`)
 )
+
+var approvedCompanionSubdirNames = map[string]bool{
+	"subs": true, "sub": true, "subtitle": true, "subtitles": true,
+	"vobsubs": true, "vobsub": true, "idx": true, "srt": true,
+	"other": true, "others": true, "extra": true, "extras": true,
+	"artwork": true, "covers": true, "cover": true, "posters": true,
+	"مجلد جديد": true, "ترجمة": true, "ترجمات": true, "ملحقات": true,
+}
 
 type IdentificationSummary struct {
 	ProcessedVideos  int `json:"processedVideos"`
@@ -66,6 +77,7 @@ type rawVideoRow struct {
 	fileID       string
 	diskID       string
 	rootID       string
+	rootRel      string
 	rootCategory string
 	relPath      string
 	parentRel    string
@@ -77,7 +89,8 @@ func (s *Service) IdentifyLibrary(ctx context.Context) (IdentificationSummary, e
 	var sum IdentificationSummary
 
 	rows, err := s.sqlDB.QueryContext(ctx, `
-		SELECT mf.id, mf.disk_id, COALESCE(mf.root_id, ''), COALESCE(lr.content_category, 'mixed'),
+		SELECT mf.id, mf.disk_id, COALESCE(mf.root_id, ''), COALESCE(lr.relative_root_path, ''),
+		       COALESCE(lr.content_category, 'mixed'),
 		       mf.relative_path, mf.parent_rel_path, mf.filename, mf.extension
 		FROM media_files mf
 		LEFT JOIN library_roots lr ON lr.id = mf.root_id
@@ -95,7 +108,7 @@ func (s *Service) IdentifyLibrary(ctx context.Context) (IdentificationSummary, e
 	var videos []rawVideoRow
 	for rows.Next() {
 		var r rawVideoRow
-		if err := rows.Scan(&r.fileID, &r.diskID, &r.rootID, &r.rootCategory, &r.relPath, &r.parentRel, &r.filename, &r.ext); err == nil {
+		if err := rows.Scan(&r.fileID, &r.diskID, &r.rootID, &r.rootRel, &r.rootCategory, &r.relPath, &r.parentRel, &r.filename, &r.ext); err == nil {
 			videos = append(videos, r)
 		}
 	}
@@ -122,11 +135,11 @@ func (s *Service) IdentifyLibrary(ctx context.Context) (IdentificationSummary, e
 			} else {
 				sum.SeriesIdentified++
 			}
-			sum.CompanionsLinked += s.linkCompanionsInFolder(ctx, v, workID, epID, true)
+			sum.CompanionsLinked += s.linkEpisodicCompanions(ctx, v, workID, epID)
 			continue
 		}
 
-		workID, status, err := s.ensureStandaloneMovieOrWork(ctx, v)
+		workID, workTitle, workYear, status, err := s.ensureStandaloneMovieOrWork(ctx, v)
 		if err != nil {
 			continue
 		}
@@ -142,10 +155,487 @@ func (s *Service) IdentifyLibrary(ctx context.Context) (IdentificationSummary, e
 		} else {
 			sum.MoviesIdentified++
 		}
-		sum.CompanionsLinked += s.linkCompanionsInFolder(ctx, v, workID, "", false)
+		sum.CompanionsLinked += s.linkMovieBundleCompanions(ctx, v, workID, workTitle, workYear)
 	}
 
+	sum.CompanionsLinked += s.reconcileRemainingCompanionsAndOrphans(ctx)
 	return sum, nil
+}
+
+func IsPromotionalBannerImage(filename string) bool {
+	base := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
+	return promoImageBannerRe.MatchString(strings.ToLower(strings.TrimSpace(base)))
+}
+
+func isApprovedCompanionSubfolder(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if approvedCompanionSubdirNames[lower] {
+		return true
+	}
+	if strings.HasPrefix(lower, "cd") && len(lower) <= 4 {
+		return true
+	}
+	if strings.HasPrefix(lower, "disc") && len(lower) <= 6 {
+		return true
+	}
+	return false
+}
+
+func resolveMoviePackageDirRel(v rawVideoRow) (packageRel string, isDedicatedMovieDir bool) {
+	parentNorm := strings.Trim(filepath.ToSlash(v.parentRel), "/")
+	rootNorm := strings.Trim(filepath.ToSlash(v.rootRel), "/")
+	if rootNorm == "." {
+		rootNorm = ""
+	}
+	if parentNorm == "." {
+		parentNorm = ""
+	}
+	if parentNorm == rootNorm {
+		return parentNorm, false
+	}
+
+	relInsideRoot := parentNorm
+	if rootNorm != "" && strings.HasPrefix(parentNorm, rootNorm+"/") {
+		relInsideRoot = strings.TrimPrefix(parentNorm, rootNorm+"/")
+	}
+	segs := strings.Split(strings.Trim(relInsideRoot, "/"), "/")
+	if len(segs) == 0 || segs[0] == "" {
+		return parentNorm, false
+	}
+	if len(segs) >= 2 && isApprovedCompanionSubfolder(segs[len(segs)-1]) {
+		upInside := strings.Join(segs[:len(segs)-1], "/")
+		if rootNorm == "" {
+			return upInside, true
+		}
+		return rootNorm + "/" + upInside, true
+	}
+	return parentNorm, true
+}
+
+type companionRow struct {
+	id       string
+	filename string
+	ext      string
+	kind     string
+	size     int64
+	relPath  string
+	parent   string
+}
+
+func (s *Service) linkMovieBundleCompanions(ctx context.Context, v rawVideoRow, workID, workTitle string, workYear int) int {
+	linked := 0
+	videoStem := strings.ToLower(strings.TrimSuffix(v.filename, v.ext))
+	workKey := naming.NormalizeWorkIdentityKey(workTitle, workYear)
+	pkgRel, isDedicatedDir := resolveMoviePackageDirRel(v)
+
+	var rows *sql.Rows
+	var err error
+	if isDedicatedDir {
+		likePrefix := pkgRel + "/%"
+		rows, err = s.sqlDB.QueryContext(ctx, `
+			SELECT id, filename, extension, file_kind, size_bytes, relative_path, parent_rel_path
+			FROM media_files
+			WHERE disk_id = ?
+			  AND (parent_rel_path = ? OR relative_path LIKE ?)
+			  AND id != ?
+			  AND presence_status = 'present'
+			  AND file_kind IN ('subtitle', 'image', 'shorts')
+			  AND work_id IS NULL
+			  AND is_apple_double = 0
+			  AND is_system_artifact = 0
+			  AND anomaly_category NOT IN ('zero_byte_files', 'auxiliary_or_unknown', 'samples_and_short_clips')
+		`, v.diskID, pkgRel, likePrefix, v.fileID)
+	} else {
+		rows, err = s.sqlDB.QueryContext(ctx, `
+			SELECT id, filename, extension, file_kind, size_bytes, relative_path, parent_rel_path
+			FROM media_files
+			WHERE disk_id = ?
+			  AND parent_rel_path = ?
+			  AND id != ?
+			  AND presence_status = 'present'
+			  AND file_kind IN ('subtitle', 'image', 'shorts')
+			  AND work_id IS NULL
+			  AND is_apple_double = 0
+			  AND is_system_artifact = 0
+			  AND anomaly_category NOT IN ('zero_byte_files', 'auxiliary_or_unknown', 'samples_and_short_clips')
+		`, v.diskID, v.parentRel, v.fileID)
+	}
+	if err != nil {
+		return 0
+	}
+
+	var candidates []companionRow
+	for rows.Next() {
+		var c companionRow
+		if err := rows.Scan(&c.id, &c.filename, &c.ext, &c.kind, &c.size, &c.relPath, &c.parent); err == nil {
+			candidates = append(candidates, c)
+		}
+	}
+	rows.Close()
+
+	videoCountInPkg := 1
+	if isDedicatedDir {
+		_ = s.sqlDB.QueryRowContext(ctx, `
+			SELECT COUNT(DISTINCT COALESCE(work_id, id))
+			FROM media_files
+			WHERE disk_id = ?
+			  AND (parent_rel_path = ? OR relative_path LIKE ?)
+			  AND file_kind = 'video'
+			  AND presence_status = 'present'
+			  AND is_sample_clip = 0
+			  AND is_apple_double = 0
+			  AND anomaly_category NOT IN ('zero_byte_files', 'samples_and_short_clips', 'auxiliary_or_unknown')
+		`, v.diskID, pkgRel, pkgRel+"/%").Scan(&videoCountInPkg)
+	}
+
+	singleMovieFolder := isDedicatedDir && videoCountInPkg <= 1
+	var acceptedImages []companionRow
+
+	for _, c := range candidates {
+		if isDedicatedDir && c.parent != pkgRel {
+			subRel := strings.TrimPrefix(c.parent, pkgRel+"/")
+			allApproved := true
+			for _, seg := range strings.Split(subRel, "/") {
+				if seg != "" && !isApprovedCompanionSubfolder(seg) {
+					allApproved = false
+					break
+				}
+			}
+			if !allApproved {
+				continue
+			}
+		}
+
+		switch c.kind {
+		case "image":
+			if c.size <= 0 {
+				continue
+			}
+			if IsPromotionalBannerImage(c.filename) {
+				_, _ = s.sqlDB.ExecContext(ctx, `
+					UPDATE media_files
+					SET anomaly_category = ?, anomaly_reason = 'Confirmed promotional torrent/website banner image', is_system_artifact = 1, keep_decision = 'candidate_error_move'
+					WHERE id = ?
+				`, scanner.AnomalyAuxiliaryOrUnknown, c.id)
+				continue
+			}
+			cStem := strings.ToLower(strings.TrimSuffix(c.filename, c.ext))
+			if !singleMovieFolder {
+				if !companionMatchesMovieIdentity(cStem, videoStem, workTitle, workYear, workKey) {
+					continue
+				}
+			}
+			acceptedImages = append(acceptedImages, c)
+
+		case "subtitle":
+			cStem := strings.TrimSuffix(c.filename, c.ext)
+			if singleMovieFolder {
+				if subtitleExplicitlyConflictsWithMovie(cStem, workTitle, workYear, workKey) {
+					_, _ = s.sqlDB.ExecContext(ctx, `
+						UPDATE media_files
+						SET anomaly_category = ?, anomaly_reason = 'Subtitle filename references a different movie title/year inside folder; routed for user review', keep_decision = 'candidate_error_move'
+						WHERE id = ?
+					`, scanner.AnomalyConflictsNeedingReview, c.id)
+					continue
+				}
+			} else {
+				if !companionMatchesMovieIdentity(strings.ToLower(cStem), videoStem, workTitle, workYear, workKey) {
+					continue
+				}
+			}
+
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE media_files SET work_id = ? WHERE id = ?`, workID, c.id)
+			linked++
+			s.registerSubtitleTrack(ctx, workID, nil, c.id, v.fileID, c.filename, c.ext)
+
+		case "shorts":
+			cStem := strings.TrimSuffix(c.filename, ".shorts")
+			if singleMovieFolder {
+				if subtitleExplicitlyConflictsWithMovie(cStem, workTitle, workYear, workKey) {
+					continue
+				}
+			} else {
+				if !companionMatchesMovieIdentity(strings.ToLower(cStem), videoStem, workTitle, workYear, workKey) {
+					continue
+				}
+			}
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE media_files SET work_id = ?, keep_decision = 'keep' WHERE id = ?`, workID, c.id)
+			linked++
+		}
+	}
+
+	if len(acceptedImages) > 0 {
+		sort.Slice(acceptedImages, func(i, j int) bool {
+			ri := scorePosterCandidate(acceptedImages[i].filename, videoStem, workTitle, acceptedImages[i].parent == pkgRel)
+			rj := scorePosterCandidate(acceptedImages[j].filename, videoStem, workTitle, acceptedImages[j].parent == pkgRel)
+			if ri != rj {
+				return ri > rj
+			}
+			return acceptedImages[i].size > acceptedImages[j].size
+		})
+
+		var currentPosterID string
+		_ = s.sqlDB.QueryRowContext(ctx, `SELECT poster_rel_path FROM works WHERE id = ?`, workID).Scan(&currentPosterID)
+
+		for idx, img := range acceptedImages {
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE media_files SET work_id = ? WHERE id = ?`, workID, img.id)
+			linked++
+
+			isPrimary := 0
+			artKind := "extra_image"
+			if idx == 0 && currentPosterID == "" {
+				isPrimary = 1
+				artKind = "poster"
+				currentPosterID = img.id
+				_, _ = s.sqlDB.ExecContext(ctx, `UPDATE works SET poster_rel_path = ? WHERE id = ?`, img.id, workID)
+			} else if strings.Contains(strings.ToLower(img.filename), "backdrop") || strings.Contains(strings.ToLower(img.filename), "fanart") {
+				artKind = "backdrop"
+			}
+
+			mime := "image/jpeg"
+			switch strings.ToLower(img.ext) {
+			case ".png":
+				mime = "image/png"
+			case ".webp":
+				mime = "image/webp"
+			}
+			var existingArt string
+			if aErr := s.sqlDB.QueryRowContext(ctx, `SELECT id FROM artwork_assets WHERE local_file_id = ?`, img.id).Scan(&existingArt); errors.Is(aErr, sql.ErrNoRows) {
+				_, _ = s.sqlDB.ExecContext(ctx, `
+					INSERT INTO artwork_assets (
+						id, entity_type, entity_id, artwork_kind, origin_type, local_file_id,
+						mime_type, width, height, byte_size, is_primary, is_protected_user_asset
+					) VALUES (?, 'work', ?, ?, 'user_local', ?, ?, 600, 900, ?, ?, 1)
+				`, domain.NewImmutableID(), workID, artKind, img.id, mime, img.size, isPrimary)
+			}
+		}
+	}
+
+	return linked
+}
+
+func scorePosterCandidate(filename, videoStemLower, workTitle string, inTopMovieDir bool) int {
+	stem := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(filename, filepath.Ext(filename))))
+	score := 0
+	if inTopMovieDir {
+		score += 20
+	}
+	switch stem {
+	case "poster":
+		score += 100
+	case "folder":
+		score += 95
+	case "cover", "front":
+		score += 90
+	case "movie":
+		score += 80
+	}
+	if videoStemLower != "" && (stem == videoStemLower || strings.HasPrefix(stem, videoStemLower)) {
+		score += 85
+	}
+	cleanWorkLower := strings.ToLower(strings.TrimSpace(workTitle))
+	if cleanWorkLower != "" && strings.Contains(stem, cleanWorkLower) {
+		score += 70
+	}
+	if strings.Contains(stem, "backdrop") || strings.Contains(stem, "fanart") || strings.Contains(stem, "screenshot") || strings.Contains(stem, "screen") {
+		score -= 25
+	}
+	return score
+}
+
+func companionMatchesMovieIdentity(compStemLower, videoStemLower, workTitle string, workYear int, workKey string) bool {
+	if videoStemLower != "" && (compStemLower == videoStemLower || strings.HasPrefix(compStemLower, videoStemLower)) {
+		return true
+	}
+	subYear, subRaw := extractTitleAndYear(compStemLower, "", "movies")
+	if subYear > 0 && workYear > 0 && subYear != workYear {
+		return false
+	}
+	candYear := workYear
+	if subYear > 0 {
+		candYear = subYear
+	}
+	candKey := naming.NormalizeWorkIdentityKey(subRaw, candYear)
+	if workKey != "" && candKey == workKey {
+		return true
+	}
+	cleanComp, err := naming.CleanTitle(compStemLower)
+	if err == nil {
+		if lang := naming.DetectSubtitleLanguageCode(compStemLower + ".srt"); lang != "" {
+			cleanComp = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(cleanComp), " "+lang))
+		}
+		if naming.NormalizeWorkIdentityKey(cleanComp, workYear) == workKey {
+			return true
+		}
+	}
+	return false
+}
+
+func subtitleExplicitlyConflictsWithMovie(rawStem, workTitle string, workYear int, workKey string) bool {
+	trimmed := strings.TrimSpace(rawStem)
+	if trimmed == "" {
+		return false
+	}
+	if naming.DetectSubtitleLanguageCode(trimmed+".srt") != "" && len(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(trimmed, ".", " "), "_", " "))) <= 2 {
+		if !yearTokenRegex.MatchString(trimmed) {
+			return false
+		}
+	}
+	if ym := yearTokenRegex.FindStringSubmatch(trimmed); len(ym) >= 2 {
+		subYr, _ := strconv.Atoi(ym[1])
+		if workYear >= 1888 && subYr >= 1888 && subYr != workYear {
+			if !strings.Contains(workTitle, ym[1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Service) registerSubtitleTrack(ctx context.Context, workID string, epNullable any, fileID, matchedVideoID, filename, ext string) {
+	lang := naming.DetectSubtitleLanguageCode(filename)
+	if lang == "" {
+		lang = "und"
+	}
+	subFmt := strings.TrimPrefix(strings.ToLower(ext), ".")
+	switch subFmt {
+	case "srt", "ass", "ssa", "vtt", "pgs":
+	case "sub", "idx":
+		subFmt = "subrip"
+	default:
+		subFmt = "other"
+	}
+	var existingSub string
+	if sErr := s.sqlDB.QueryRowContext(ctx, `SELECT id FROM subtitle_tracks WHERE file_id = ?`, fileID).Scan(&existingSub); errors.Is(sErr, sql.ErrNoRows) {
+		_, _ = s.sqlDB.ExecContext(ctx, `
+			INSERT INTO subtitle_tracks (
+				id, work_id, episode_id, file_id, matched_video_file_id,
+				source_type, format, language_code, is_matched_primary
+			) VALUES (?, ?, ?, ?, ?, 'external_file', ?, ?, 1)
+		`, domain.NewImmutableID(), workID, epNullable, fileID, matchedVideoID, subFmt, lang)
+	}
+}
+
+func (s *Service) reconcileRemainingCompanionsAndOrphans(ctx context.Context) int {
+	linked := 0
+
+	type knownWork struct {
+		workID   string
+		diskID   string
+		videoID  string
+		title    string
+		year     int
+		identKey string
+	}
+	wRows, err := s.sqlDB.QueryContext(ctx, `
+		SELECT w.id, mf.disk_id, mf.id, w.title_original, COALESCE(w.production_year, 0), w.normalized_identity_key
+		FROM works w
+		JOIN media_files mf ON mf.work_id = w.id AND mf.file_kind = 'video' AND mf.presence_status = 'present'
+		WHERE w.sub_format = 'standalone'
+	`)
+	var known []knownWork
+	if err == nil {
+		for wRows.Next() {
+			var kw knownWork
+			if err := wRows.Scan(&kw.workID, &kw.diskID, &kw.videoID, &kw.title, &kw.year, &kw.identKey); err == nil {
+				if kw.identKey == "" && kw.year > 0 {
+					kw.identKey = naming.NormalizeWorkIdentityKey(kw.title, kw.year)
+				}
+				known = append(known, kw)
+			}
+		}
+		wRows.Close()
+	}
+
+	uRows, err := s.sqlDB.QueryContext(ctx, `
+		SELECT id, disk_id, filename, extension, file_kind, parent_rel_path
+		FROM media_files
+		WHERE work_id IS NULL
+		  AND presence_status = 'present'
+		  AND file_kind IN ('subtitle', 'image', 'shorts')
+		  AND is_apple_double = 0
+		  AND is_system_artifact = 0
+		  AND anomaly_category = ''
+	`)
+	if err != nil {
+		return 0
+	}
+	type unlinkedItem struct {
+		id, diskID, filename, ext, kind, parentRel string
+	}
+	var unlinked []unlinkedItem
+	for uRows.Next() {
+		var u unlinkedItem
+		if err := uRows.Scan(&u.id, &u.diskID, &u.filename, &u.ext, &u.kind, &u.parentRel); err == nil {
+			unlinked = append(unlinked, u)
+		}
+	}
+	uRows.Close()
+
+	for _, u := range unlinked {
+		if u.kind == "image" && IsPromotionalBannerImage(u.filename) {
+			_, _ = s.sqlDB.ExecContext(ctx, `
+				UPDATE media_files
+				SET anomaly_category = ?, anomaly_reason = 'Confirmed promotional torrent/website banner image', is_system_artifact = 1, keep_decision = 'candidate_error_move'
+				WHERE id = ?
+			`, scanner.AnomalyAuxiliaryOrUnknown, u.id)
+			continue
+		}
+
+		stem := strings.TrimSuffix(u.filename, u.ext)
+		if u.kind == "shorts" {
+			stem = strings.TrimSuffix(u.filename, ".shorts")
+		}
+		yr, rawTitle := extractTitleAndYear(stem, u.parentRel, "movies")
+		var matchedWork *knownWork
+		if yr >= 1888 {
+			candKey := naming.NormalizeWorkIdentityKey(rawTitle, yr)
+			for i := range known {
+				if known[i].diskID == u.diskID && known[i].identKey == candKey {
+					matchedWork = &known[i]
+					break
+				}
+			}
+		}
+
+		if matchedWork != nil {
+			if u.kind == "subtitle" {
+				_, _ = s.sqlDB.ExecContext(ctx, `UPDATE media_files SET work_id = ? WHERE id = ?`, matchedWork.workID, u.id)
+				s.registerSubtitleTrack(ctx, matchedWork.workID, nil, u.id, matchedWork.videoID, u.filename, u.ext)
+				linked++
+				continue
+			}
+			if u.kind == "shorts" {
+				_, _ = s.sqlDB.ExecContext(ctx, `UPDATE media_files SET work_id = ?, keep_decision = 'keep' WHERE id = ?`, matchedWork.workID, u.id)
+				linked++
+				continue
+			}
+		}
+
+		if u.kind == "subtitle" {
+			var videosInDir int
+			_ = s.sqlDB.QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM media_files
+				WHERE disk_id = ? AND parent_rel_path = ? AND file_kind = 'video'
+				  AND presence_status = 'present' AND is_sample_clip = 0 AND is_apple_double = 0
+			`, u.diskID, u.parentRel).Scan(&videosInDir)
+			if videosInDir == 0 {
+				_, _ = s.sqlDB.ExecContext(ctx, `
+					UPDATE media_files
+					SET anomaly_category = ?, anomaly_reason = 'Orphan subtitle with no matching video file in folder or library root', keep_decision = 'candidate_error_move'
+					WHERE id = ?
+				`, scanner.AnomalyUnlinkedSubtitles, u.id)
+			} else {
+				_, _ = s.sqlDB.ExecContext(ctx, `
+					UPDATE media_files
+					SET anomaly_category = ?, anomaly_reason = 'Unmatched subtitle in multi-video directory; requires manual review before linking or moving', keep_decision = 'undecided'
+					WHERE id = ?
+				`, scanner.AnomalyUnlinkedSubtitles, u.id)
+			}
+		}
+	}
+
+	return linked
 }
 
 func detectEpisodicSignals(v rawVideoRow) (bool, string, int, int, float64) {
@@ -241,10 +731,15 @@ func (s *Service) ensureSeriesAndEpisode(ctx context.Context, v rawVideoRow, raw
 		status = "needs_review"
 	}
 
+	identKey := naming.NormalizeWorkIdentityKey(canonicalSeries, 0)
+
 	var workID string
 	qErr := s.sqlDB.QueryRowContext(ctx, `
-		SELECT id FROM works WHERE sub_format = 'episodic' AND lower(canonical_folder_name) = lower(?) LIMIT 1
-	`, canonicalSeries).Scan(&workID)
+		SELECT id FROM works
+		WHERE sub_format = 'episodic'
+		  AND (lower(canonical_folder_name) = lower(?) OR (normalized_identity_key != '' AND normalized_identity_key = ?))
+		LIMIT 1
+	`, canonicalSeries, identKey).Scan(&workID)
 	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
 
 	if errors.Is(qErr, sql.ErrNoRows) {
@@ -252,10 +747,10 @@ func (s *Service) ensureSeriesAndEpisode(ctx context.Context, v rawVideoRow, raw
 		_, err = s.sqlDB.ExecContext(ctx, `
 			INSERT INTO works (
 				id, media_type, sub_format, title_original, title_ar, title_en, sort_title,
-				original_language, is_arabic_origin, canonical_folder_name, identification_status,
-				confidence_score, is_local_present, created_at, updated_at
-			) VALUES (?, ?, 'episodic', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-		`, workID, mediaType, canonicalSeries, titleAr, titleEn, canonicalSeries, origLang, boolToInt(isAr), canonicalSeries, status, conf, nowStr, nowStr)
+				original_language, is_arabic_origin, canonical_folder_name, normalized_identity_key,
+				identification_status, confidence_score, is_local_present, created_at, updated_at
+			) VALUES (?, ?, 'episodic', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+		`, workID, mediaType, canonicalSeries, titleAr, titleEn, canonicalSeries, origLang, boolToInt(isAr), canonicalSeries, identKey, status, conf, nowStr, nowStr)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -295,29 +790,45 @@ func (s *Service) ensureSeriesAndEpisode(ctx context.Context, v rawVideoRow, raw
 		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE episodes SET is_missing = 0, updated_at = ? WHERE id = ?`, nowStr, epID)
 	}
 
-	// Link series-level poster in parent series folder if present (`Series Name/poster.jpg`)
 	parts := strings.Split(strings.Trim(v.parentRel, "/"), "/")
 	if len(parts) > 1 && seasonDirRegex.MatchString(parts[len(parts)-1]) {
 		seriesParentRel := strings.Join(parts[:len(parts)-1], "/")
-		_, _ = s.sqlDB.ExecContext(ctx, `
-			UPDATE media_files SET work_id = ? WHERE disk_id = ? AND parent_rel_path = ? AND file_kind = 'image' AND work_id IS NULL
-		`, workID, v.diskID, seriesParentRel)
-		var pFileID string
-		if pErr := s.sqlDB.QueryRowContext(ctx, `
-			SELECT id FROM media_files WHERE disk_id = ? AND parent_rel_path = ? AND file_kind = 'image' LIMIT 1
-		`, v.diskID, seriesParentRel).Scan(&pFileID); pErr == nil && pFileID != "" {
-			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE works SET poster_rel_path = ? WHERE id = ? AND poster_rel_path = ''`, pFileID, workID)
+		pRows, pErr := s.sqlDB.QueryContext(ctx, `
+			SELECT id, filename FROM media_files
+			WHERE disk_id = ? AND parent_rel_path = ? AND file_kind = 'image'
+			  AND is_apple_double = 0 AND is_system_artifact = 0 AND size_bytes > 0
+			  AND presence_status = 'present'
+		`, v.diskID, seriesParentRel)
+		if pErr == nil {
+			var chosenPosterID string
+			for pRows.Next() {
+				var pid, pname string
+				if err := pRows.Scan(&pid, &pname); err == nil {
+					if IsPromotionalBannerImage(pname) {
+						continue
+					}
+					_, _ = s.sqlDB.ExecContext(ctx, `UPDATE media_files SET work_id = ? WHERE id = ? AND work_id IS NULL`, workID, pid)
+					if chosenPosterID == "" {
+						chosenPosterID = pid
+					}
+				}
+			}
+			pRows.Close()
+			if chosenPosterID != "" {
+				_, _ = s.sqlDB.ExecContext(ctx, `UPDATE works SET poster_rel_path = ? WHERE id = ? AND poster_rel_path = ''`, chosenPosterID, workID)
+			}
 		}
 	}
 
 	return workID, epID, status, nil
 }
 
-func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow) (string, string, error) {
+func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow) (string, string, int, string, error) {
 	stem := strings.TrimSuffix(v.filename, v.ext)
-	parts := strings.Split(strings.Trim(v.parentRel, "/"), "/")
+	pkgRel, isDedicatedDir := resolveMoviePackageDirRel(v)
 	parentFolder := ""
-	if len(parts) > 0 {
+	if isDedicatedDir && pkgRel != "" {
+		parts := strings.Split(strings.Trim(pkgRel, "/"), "/")
 		parentFolder = parts[len(parts)-1]
 	}
 
@@ -339,7 +850,7 @@ func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow
 				confidence_score, is_local_present, created_at, updated_at
 			) VALUES (?, 'tv_program', 'standalone', ?, ?, ?, ?, ?, ?, ?, 'unknown_program', 0.45, 1, ?, ?)
 		`, workID, plan.FolderName, tAr, tEn, plan.FolderName, langCode(isAr), boolToInt(isAr), plan.FolderName, nowStr, nowStr)
-		return workID, "unknown_program", err
+		return workID, plan.FolderName, 0, "unknown_program", err
 	}
 
 	year, rawTitle := extractTitleAndYear(stem, parentFolder, v.rootCategory)
@@ -352,6 +863,7 @@ func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow
 	status := "needs_review"
 	canonicalFolder := cleanedTitle
 	var yearPtr any = nil
+	identKey := ""
 
 	if year >= 1888 && year <= 2100 && len([]rune(cleanedTitle)) >= 2 && !isGenericAmbiguousTitle(cleanedTitle) {
 		if formatted, fErr := naming.FormatMovieName(cleanedTitle, year); fErr == nil {
@@ -359,6 +871,7 @@ func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow
 			yearPtr = year
 			conf = 0.91
 			status = "identified"
+			identKey = naming.NormalizeWorkIdentityKey(cleanedTitle, year)
 		}
 	}
 
@@ -367,13 +880,25 @@ func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow
 		mediaType = "documentary_movie"
 	}
 
-	var existingWorkID string
 	if yearPtr != nil {
+		var existingWorkID, existingTitle string
 		qErr := s.sqlDB.QueryRowContext(ctx, `
-			SELECT id FROM works WHERE media_type = ? AND lower(canonical_folder_name) = lower(?) LIMIT 1
-		`, mediaType, canonicalFolder).Scan(&existingWorkID)
+			SELECT id, title_original FROM works
+			WHERE media_type = ?
+			  AND production_year = ?
+			  AND (lower(canonical_folder_name) = lower(?) OR (normalized_identity_key != '' AND normalized_identity_key = ?))
+			LIMIT 1
+		`, mediaType, year, canonicalFolder, identKey).Scan(&existingWorkID, &existingTitle)
 		if qErr == nil && existingWorkID != "" {
-			return existingWorkID, status, nil
+			if strings.ContainsAny(cleanedTitle, "0123456789") && !strings.ContainsAny(existingTitle, "0123456789") {
+				_, _ = s.sqlDB.ExecContext(ctx, `
+					UPDATE works SET title_original = ?, title_en = CASE WHEN is_arabic_origin = 0 THEN ? ELSE title_en END,
+					                 sort_title = ?, canonical_folder_name = ?
+					WHERE id = ? AND identification_status != 'locked_by_user'
+				`, cleanedTitle, cleanedTitle, cleanedTitle, canonicalFolder, existingWorkID)
+				existingTitle = cleanedTitle
+			}
+			return existingWorkID, existingTitle, year, status, nil
 		}
 	}
 
@@ -391,20 +916,20 @@ func (s *Service) ensureStandaloneMovieOrWork(ctx context.Context, v rawVideoRow
 		INSERT INTO works (
 			id, media_type, sub_format, title_original, title_ar, title_en, sort_title,
 			original_language, is_arabic_origin, production_year, canonical_folder_name,
-			identification_status, confidence_score, is_local_present, created_at, updated_at
-		) VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-	`, workID, mediaType, cleanedTitle, tAr, tEn, cleanedTitle, langCode(isAr), boolToInt(isAr), yearPtr, canonicalFolder, status, conf, nowStr, nowStr)
+			normalized_identity_key, identification_status, confidence_score, is_local_present, created_at, updated_at
+		) VALUES (?, ?, 'standalone', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+	`, workID, mediaType, cleanedTitle, tAr, tEn, cleanedTitle, langCode(isAr), boolToInt(isAr), yearPtr, canonicalFolder, identKey, status, conf, nowStr, nowStr)
 	if insErr != nil {
-		return "", "", insErr
+		return "", "", 0, "", insErr
 	}
 
 	if isAr {
 		_, _ = s.sqlDB.ExecContext(ctx, `INSERT OR IGNORE INTO work_countries (work_id, country_code) VALUES (?, 'EG')`, workID)
 	}
-	return workID, status, nil
+	return workID, cleanedTitle, year, status, nil
 }
 
-func (s *Service) linkCompanionsInFolder(ctx context.Context, v rawVideoRow, workID, epID string, isEpisodic bool) int {
+func (s *Service) linkEpisodicCompanions(ctx context.Context, v rawVideoRow, workID, epID string) int {
 	linked := 0
 	videoStem := strings.ToLower(strings.TrimSuffix(v.filename, v.ext))
 
@@ -415,7 +940,7 @@ func (s *Service) linkCompanionsInFolder(ctx context.Context, v rawVideoRow, wor
 		  AND parent_rel_path = ?
 		  AND id != ?
 		  AND presence_status = 'present'
-		  AND file_kind != 'video'
+		  AND file_kind IN ('subtitle', 'image', 'shorts')
 		  AND is_apple_double = 0
 		  AND is_system_artifact = 0
 		  AND anomaly_category NOT IN ('zero_byte_files', 'auxiliary_or_unknown', 'samples_and_short_clips')
@@ -423,30 +948,30 @@ func (s *Service) linkCompanionsInFolder(ctx context.Context, v rawVideoRow, wor
 	if err != nil {
 		return 0
 	}
-	type comp struct {
-		id, filename, ext, kind, rel string
-		size                         int64
-	}
-	var comps []comp
+	var comps []companionRow
 	for rows.Next() {
-		var c comp
-		if err := rows.Scan(&c.id, &c.filename, &c.ext, &c.kind, &c.size, &c.rel); err == nil {
+		var c companionRow
+		if err := rows.Scan(&c.id, &c.filename, &c.ext, &c.kind, &c.size, &c.relPath); err == nil {
 			comps = append(comps, c)
 		}
 	}
 	rows.Close()
 
 	for _, c := range comps {
+		if c.kind == "image" && IsPromotionalBannerImage(c.filename) {
+			continue
+		}
 		cStem := strings.ToLower(strings.TrimSuffix(c.filename, c.ext))
-		if isEpisodic {
-			isSeasonPoster := c.kind == "image" && (cStem == "poster" || cStem == "folder" || cStem == "cover")
-			if !isSeasonPoster && !strings.HasPrefix(cStem, videoStem) {
-				continue
-			}
+		if c.kind == "shorts" {
+			cStem = strings.ToLower(strings.TrimSuffix(c.filename, ".shorts"))
+		}
+		isSeasonPoster := c.kind == "image" && (cStem == "poster" || cStem == "folder" || cStem == "cover")
+		if !isSeasonPoster && !strings.HasPrefix(cStem, videoStem) {
+			continue
 		}
 
 		var epNullable any = nil
-		if epID != "" && !(c.kind == "image" && (cStem == "poster" || cStem == "folder")) {
+		if epID != "" && !isSeasonPoster {
 			epNullable = epID
 		}
 
@@ -456,43 +981,7 @@ func (s *Service) linkCompanionsInFolder(ctx context.Context, v rawVideoRow, wor
 		linked++
 
 		if c.kind == "subtitle" {
-			lang := strings.TrimPrefix(naming.ExtractLanguageSuffix(c.filename), ".")
-			if lang == "" {
-				lang = "ar"
-			}
-			subFmt := strings.TrimPrefix(c.ext, ".")
-			if subFmt == "sub" {
-				subFmt = "subrip"
-			}
-			var existingSub string
-			if sErr := s.sqlDB.QueryRowContext(ctx, `SELECT id FROM subtitle_tracks WHERE file_id = ?`, c.id).Scan(&existingSub); errors.Is(sErr, sql.ErrNoRows) {
-				_, _ = s.sqlDB.ExecContext(ctx, `
-					INSERT INTO subtitle_tracks (
-						id, work_id, episode_id, file_id, matched_video_file_id,
-						source_type, format, language_code, is_matched_primary
-					) VALUES (?, ?, ?, ?, ?, 'external_file', ?, ?, 1)
-				`, domain.NewImmutableID(), workID, epNullable, c.id, v.fileID, subFmt, lang)
-			}
-		}
-
-		if c.kind == "image" && c.size > 0 {
-			mime := "image/jpeg"
-			switch c.ext {
-			case ".png":
-				mime = "image/png"
-			case ".webp":
-				mime = "image/webp"
-			}
-			var existingArt string
-			if aErr := s.sqlDB.QueryRowContext(ctx, `SELECT id FROM artwork_assets WHERE local_file_id = ?`, c.id).Scan(&existingArt); errors.Is(aErr, sql.ErrNoRows) {
-				_, _ = s.sqlDB.ExecContext(ctx, `
-					INSERT INTO artwork_assets (
-						id, entity_type, entity_id, artwork_kind, origin_type, local_file_id,
-						mime_type, width, height, byte_size, is_primary, is_protected_user_asset
-					) VALUES (?, 'work', ?, 'poster', 'user_local', ?, ?, 600, 900, ?, 1, 1)
-				`, domain.NewImmutableID(), workID, c.id, mime, c.size)
-			}
-			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE works SET poster_rel_path = ? WHERE id = ? AND poster_rel_path = ''`, c.id, workID)
+			s.registerSubtitleTrack(ctx, workID, epNullable, c.id, v.fileID, c.filename, c.ext)
 		}
 	}
 	return linked
@@ -586,24 +1075,30 @@ func (s *Service) LookupTMDbOptional(ctx context.Context, query string, mediaTyp
 }
 
 func extractTitleAndYear(stem, parentFolder, rootCategory string) (int, string) {
-	if ym := yearTokenRegex.FindStringSubmatchIndex(stem); len(ym) >= 4 {
-		yr, _ := strconv.Atoi(stem[ym[2]:ym[3]])
-		prefix := strings.TrimSpace(stem[:ym[0]])
-		if prefix != "" {
-			return yr, prefix
-		}
+	if yr, pref, ok := splitLastYearWithNonEmptyPrefix(stem); ok {
+		return yr, pref
 	}
 	lowerParent := strings.ToLower(filepath.Base(parentFolder))
 	if parentFolder != "" && lowerParent != rootCategory && lowerParent != "movies" && lowerParent != "افلام" && lowerParent != "أفلام" {
-		if ym := yearTokenRegex.FindStringSubmatchIndex(parentFolder); len(ym) >= 4 {
-			yr, _ := strconv.Atoi(parentFolder[ym[2]:ym[3]])
-			prefix := strings.TrimSpace(parentFolder[:ym[0]])
-			if prefix != "" {
-				return yr, prefix
-			}
+		if yr, pref, ok := splitLastYearWithNonEmptyPrefix(parentFolder); ok {
+			return yr, pref
 		}
 	}
 	return 0, stem
+}
+
+func splitLastYearWithNonEmptyPrefix(raw string) (int, string, bool) {
+	cleaned := strings.TrimSpace(raw)
+	matches := yearTokenRegex.FindAllStringSubmatchIndex(cleaned, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		yr, _ := strconv.Atoi(cleaned[m[2]:m[3]])
+		prefix := strings.TrimSpace(cleaned[:m[0]])
+		if cleanPref, err := naming.CleanTitle(prefix); err == nil && cleanPref != "" {
+			return yr, prefix, true
+		}
+	}
+	return 0, "", false
 }
 
 func isGenericAmbiguousTitle(s string) bool {

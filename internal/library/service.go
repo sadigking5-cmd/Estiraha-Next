@@ -108,6 +108,18 @@ func ResolveFullPath(mountPath, relativePath string) string {
 	return filepath.Join(mountPath, filepath.FromSlash(relativePath))
 }
 
+func RelativeFromMount(mountPath, fullPath string) (string, error) {
+	rel, err := filepath.Rel(filepath.Clean(mountPath), filepath.Clean(fullPath))
+	if err != nil {
+		return "", err
+	}
+	slash := strings.Trim(filepath.ToSlash(rel), "/")
+	if slash == "." {
+		return "", nil
+	}
+	return slash, nil
+}
+
 func (s *Service) AddRoot(ctx context.Context, in AddRootInput) (RootView, error) {
 	rawPath := strings.TrimSpace(in.FullPath)
 	if rawPath == "" {

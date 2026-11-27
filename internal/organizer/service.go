@@ -15,10 +15,12 @@ import (
 
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/backup"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/domain"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/errorsbox"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/fsops"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/library"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/naming"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/review"
+	"strings"
 )
 
 var (
@@ -61,6 +63,7 @@ type JournalEntryView struct {
 type Service struct {
 	sqlDB     *sql.DB
 	backupSvc *backup.Service
+	errBoxSvc *errorsbox.Service
 	mu        sync.Mutex
 }
 
@@ -68,13 +71,19 @@ func NewService(sqlDB *sql.DB, backupSvc *backup.Service) *Service {
 	return &Service{
 		sqlDB:     sqlDB,
 		backupSvc: backupSvc,
+		errBoxSvc: errorsbox.NewService(sqlDB),
 	}
 }
 
 type approvedStep struct {
 	itemID       string
 	fileID       string
+	rootID       string
+	rootRel      string
+	itemFileKind string
 	actionKind   string
+	errorCatCode string
+	reasonDesc   string
 	diskID       string
 	mountPath    string
 	oldRel       string
@@ -95,14 +104,19 @@ func (s *Service) ExecuteApprovedBatch(ctx context.Context, batchID string) (Exe
 	}
 
 	rows, err := s.sqlDB.QueryContext(ctx, `
-		SELECT ri.id, COALESCE(ri.file_id, ''), ri.action_kind, ri.source_disk_id, d.mount_path,
+		SELECT ri.id, COALESCE(ri.file_id, ''),
+		       COALESCE(mf.root_id, ''), COALESCE(lr.relative_root_path, ''),
+		       ri.item_file_kind, ri.action_kind, ri.error_category_code, ri.reason_description,
+		       ri.source_disk_id, d.mount_path,
 		       ri.old_rel_path, ri.old_name,
 		       COALESCE(NULLIF(ri.user_edited_rel_path, ''), ri.proposed_rel_path),
 		       COALESCE(ri.decided_at, '')
 		FROM review_items ri
 		JOIN disks d ON d.id = ri.source_disk_id
+		LEFT JOIN media_files mf ON mf.id = ri.file_id
+		LEFT JOIN library_roots lr ON lr.id = mf.root_id
 		WHERE ri.batch_id = ? AND ri.decision_status = 'approved'
-		ORDER BY ri.created_at ASC
+		ORDER BY CASE ri.item_file_kind WHEN 'file' THEN 0 ELSE 1 END ASC, ri.created_at ASC
 	`, batchID)
 	if err != nil {
 		return res, err
@@ -110,7 +124,11 @@ func (s *Service) ExecuteApprovedBatch(ctx context.Context, batchID string) (Exe
 	var steps []approvedStep
 	for rows.Next() {
 		var st approvedStep
-		if err := rows.Scan(&st.itemID, &st.fileID, &st.actionKind, &st.diskID, &st.mountPath, &st.oldRel, &st.oldName, &st.effectiveRel, &st.decidedAt); err == nil {
+		if err := rows.Scan(
+			&st.itemID, &st.fileID, &st.rootID, &st.rootRel,
+			&st.itemFileKind, &st.actionKind, &st.errorCatCode, &st.reasonDesc,
+			&st.diskID, &st.mountPath, &st.oldRel, &st.oldName, &st.effectiveRel, &st.decidedAt,
+		); err == nil {
 			steps = append(steps, st)
 		}
 	}
@@ -118,6 +136,14 @@ func (s *Service) ExecuteApprovedBatch(ctx context.Context, batchID string) (Exe
 
 	if len(steps) == 0 {
 		return res, ErrNoApprovedItems
+	}
+
+	scheduledEmptyDirs := map[string]bool{}
+	for _, st := range steps {
+		if st.itemFileKind == "directory" {
+			fullDir := filepath.Clean(library.ResolveFullPath(st.mountPath, st.oldRel))
+			scheduledEmptyDirs[fullDir] = true
+		}
 	}
 
 	if s.backupSvc != nil && s.backupSvc.BackupDir() != "" {
@@ -145,6 +171,104 @@ func (s *Service) ExecuteApprovedBatch(ctx context.Context, batchID string) (Exe
 			ReviewItemID: st.itemID,
 			Decision:     review.DecisionApproved,
 			ApprovedAt:   approvedTime,
+		}
+
+		if st.actionKind == "move_to_errors" {
+			if naming.IsShortsExtension(st.oldName) {
+				res.AbortedCount++
+				res.Errors = append(res.Errors, fmt.Sprintf("Safety law blocked moving .shorts to الأخطاء: %s", st.oldName))
+				continue
+			}
+
+			rootID, rootRel := st.rootID, st.rootRel
+			if rootRel == "" && st.rootID == "" {
+				rootID, rootRel = s.resolveEnclosingRoot(ctx, st.diskID, st.oldRel)
+			}
+			rootFull := library.ResolveFullPath(st.mountPath, rootRel)
+			if _, _, ensErr := s.errBoxSvc.EnsureErrorStructure(rootFull); ensErr != nil {
+				res.AbortedCount++
+				res.Errors = append(res.Errors, ensErr.Error())
+				continue
+			}
+
+			srcFull := library.ResolveFullPath(st.mountPath, st.oldRel)
+			if st.itemFileKind == "directory" {
+				pruneEmptyChildSubdirs(srcFull)
+				entries, rdErr := os.ReadDir(srcFull)
+				if rdErr != nil || len(entries) > 0 {
+					res.SkippedCount++
+					_, _ = s.sqlDB.ExecContext(ctx, `
+						UPDATE review_items SET decision_status = 'deferred', conflict_details = 'Skipped empty-folder move because unmoved files remain inside folder'
+						WHERE id = ?
+					`, st.itemID)
+					continue
+				}
+			}
+
+			journalID := domain.NewImmutableID()
+			stepStart := time.Now().UTC().Format(time.RFC3339Nano)
+			dstPreviewFull := library.ResolveFullPath(st.mountPath, st.effectiveRel)
+
+			_, _ = s.sqlDB.ExecContext(ctx, `
+				INSERT INTO operation_journal (
+					id, batch_id, review_item_id, step_sequence, operation_state,
+					source_snapshot_path, destination_snapshot_path, last_successful_substep, started_at
+				) VALUES (?, ?, ?, ?, 'in_progress', ?, ?, 'errorsbox_init', ?)
+			`, journalID, batchID, st.itemID, seq, srcFull, dstPreviewFull, stepStart)
+
+			ev, mvErr := s.errBoxSvc.MoveApprovedItem(ctx, errorsbox.MoveToErrorsRequest{
+				Permit:          permit,
+				DiskID:          st.diskID,
+				RootID:          rootID,
+				MountPath:       st.mountPath,
+				RootRelPath:     rootRel,
+				FileID:          st.fileID,
+				JournalID:       journalID,
+				EntryKind:       st.itemFileKind,
+				Category:        errorsbox.CategoryCode(st.errorCatCode),
+				OriginalRelPath: st.oldRel,
+				ReasonAr:        st.reasonDesc,
+				ReasonEn:        st.reasonDesc,
+			})
+			if mvErr != nil {
+				_, _ = s.sqlDB.ExecContext(ctx, `
+					UPDATE operation_journal SET operation_state = 'aborted_target_exists', error_message = ?, completed_at = ?
+					WHERE id = ?
+				`, mvErr.Error(), stepStart, journalID)
+				_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET decision_status = 'failed', conflict_details = ? WHERE id = ?`, mvErr.Error(), st.itemID)
+				res.AbortedCount++
+				res.Errors = append(res.Errors, fmt.Sprintf("%s -> %v", st.oldName, mvErr))
+				continue
+			}
+
+			actualDstFull := library.ResolveFullPath(st.mountPath, ev.ErrorRelPath)
+			doneStr := time.Now().UTC().Format(time.RFC3339Nano)
+			var hashNullable sql.NullString
+			if ev.SHA256Hash != "" {
+				hashNullable = sql.NullString{String: ev.SHA256Hash, Valid: true}
+			}
+
+			_, _ = s.sqlDB.ExecContext(ctx, `
+				UPDATE operation_journal
+				SET operation_state = 'completed', destination_snapshot_path = ?, pre_sha256 = ?, post_sha256 = ?,
+				    last_successful_substep = 'errorsbox_verified', completed_at = ?
+				WHERE id = ?
+			`, actualDstFull, hashNullable, hashNullable, doneStr, journalID)
+
+			_, _ = s.sqlDB.ExecContext(ctx, `
+				INSERT INTO rollback_steps (
+					id, journal_id, batch_id, reverse_order, reverse_action,
+					from_disk_id, from_rel_path, to_disk_id, to_rel_path, expected_sha256, error_entry_id, rollback_status
+				) VALUES (?, ?, ?, ?, 'move_back', ?, ?, ?, ?, ?, ?, 'ready')
+			`, domain.NewImmutableID(), journalID, batchID, seq, st.diskID, ev.ErrorRelPath, st.diskID, st.oldRel, hashNullable, ev.ID)
+
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET decision_status = 'executed' WHERE id = ?`, st.itemID)
+			res.ExecutedCount++
+
+			if st.itemFileKind == "file" {
+				cleanEmptyParentChain(filepath.Dir(srcFull), rootFull, scheduledEmptyDirs)
+			}
+			continue
 		}
 
 		newBase := filepath.Base(filepath.FromSlash(st.effectiveRel))
@@ -235,14 +359,16 @@ func (s *Service) ExecuteApprovedBatch(ctx context.Context, batchID string) (Exe
 		_, _ = s.sqlDB.ExecContext(ctx, `
 			INSERT INTO rollback_steps (
 				id, journal_id, batch_id, reverse_order, reverse_action,
-				from_disk_id, from_rel_path, to_disk_id, to_rel_path, expected_sha256, rollback_status
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')
+				from_disk_id, from_rel_path, to_disk_id, to_rel_path, expected_sha256, error_entry_id, rollback_status
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'ready')
 		`, domain.NewImmutableID(), journalID, batchID, seq, revAction, st.diskID, st.effectiveRel, st.diskID, st.oldRel, postHash)
 
 		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET decision_status = 'executed' WHERE id = ?`, st.itemID)
 		res.ExecutedCount++
 
-		cleanEmptyParentSafely(filepath.Dir(srcFull), st.mountPath)
+		_, rootRel := s.resolveEnclosingRoot(ctx, st.diskID, st.oldRel)
+		stopBoundary := library.ResolveFullPath(st.mountPath, rootRel)
+		cleanEmptyParentChain(filepath.Dir(srcFull), stopBoundary, scheduledEmptyDirs)
 	}
 
 	finalStatus := "completed"
@@ -256,8 +382,8 @@ func (s *Service) ExecuteApprovedBatch(ctx context.Context, batchID string) (Exe
 		INSERT INTO audit_logs (id, event_category, severity, actor, summary, details_json)
 		VALUES (?, 'fsops', 'info', 'user', ?, ?)
 	`, domain.NewImmutableID(),
-		fmt.Sprintf("Executed approved batch %s (%d moved/renamed, %d aborted)", batchID[:8], res.ExecutedCount, res.AbortedCount),
-		fmt.Sprintf(`{"batchId":%q,"executed":%d,"aborted":%d}`, batchID, res.ExecutedCount, res.AbortedCount),
+		fmt.Sprintf("Executed approved batch %s (%d moved/renamed, %d skipped, %d aborted)", batchID[:8], res.ExecutedCount, res.SkippedCount, res.AbortedCount),
+		fmt.Sprintf(`{"batchId":%q,"executed":%d,"skipped":%d,"aborted":%d}`, batchID, res.ExecutedCount, res.SkippedCount, res.AbortedCount),
 	)
 
 	return res, nil
@@ -276,7 +402,8 @@ func (s *Service) RollbackBatch(ctx context.Context, batchID string) (RollbackRe
 
 	rows, err := s.sqlDB.QueryContext(ctx, `
 		SELECT rs.id, rs.journal_id, oj.review_item_id, COALESCE(ri.file_id, ''),
-		       rs.from_disk_id, d.mount_path, rs.from_rel_path, rs.to_rel_path, COALESCE(rs.expected_sha256, '')
+		       rs.from_disk_id, d.mount_path, rs.from_rel_path, rs.to_rel_path,
+		       COALESCE(rs.expected_sha256, ''), rs.error_entry_id
 		FROM rollback_steps rs
 		JOIN operation_journal oj ON oj.id = rs.journal_id
 		JOIN review_items ri ON ri.id = oj.review_item_id
@@ -288,12 +415,12 @@ func (s *Service) RollbackBatch(ctx context.Context, batchID string) (RollbackRe
 		return res, err
 	}
 	type rbRow struct {
-		rbID, journalID, itemID, fileID, diskID, mountPath, fromRel, toRel, expHash string
+		rbID, journalID, itemID, fileID, diskID, mountPath, fromRel, toRel, expHash, errEntryID string
 	}
 	var list []rbRow
 	for rows.Next() {
 		var r rbRow
-		if err := rows.Scan(&r.rbID, &r.journalID, &r.itemID, &r.fileID, &r.diskID, &r.mountPath, &r.fromRel, &r.toRel, &r.expHash); err == nil {
+		if err := rows.Scan(&r.rbID, &r.journalID, &r.itemID, &r.fileID, &r.diskID, &r.mountPath, &r.fromRel, &r.toRel, &r.expHash, &r.errEntryID); err == nil {
 			list = append(list, r)
 		}
 	}
@@ -304,6 +431,23 @@ func (s *Service) RollbackBatch(ctx context.Context, batchID string) (RollbackRe
 	}
 
 	for _, r := range list {
+		if r.errEntryID != "" {
+			if _, restErr := s.errBoxSvc.RestoreEntry(ctx, r.errEntryID); restErr != nil {
+				if errors.Is(restErr, errorsbox.ErrRestoreCollision) {
+					_, _ = s.sqlDB.ExecContext(ctx, `UPDATE rollback_steps SET rollback_status = 'blocked_collision' WHERE id = ?`, r.rbID)
+				}
+				res.BlockedCount++
+				res.Errors = append(res.Errors, fmt.Sprintf("ErrorsBox restore %s: %v", r.toRel, restErr))
+				continue
+			}
+			nowStr := time.Now().UTC().Format(time.RFC3339Nano)
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE rollback_steps SET rollback_status = 'executed', executed_at = ? WHERE id = ?`, nowStr, r.rbID)
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE operation_journal SET operation_state = 'rolled_back' WHERE id = ?`, r.journalID)
+			_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET decision_status = 'rolled_back' WHERE id = ?`, r.itemID)
+			res.RestoredCount++
+			continue
+		}
+
 		curFull := library.ResolveFullPath(r.mountPath, r.fromRel)
 		origFull := library.ResolveFullPath(r.mountPath, r.toRel)
 
@@ -341,16 +485,20 @@ func (s *Service) RollbackBatch(ctx context.Context, batchID string) (RollbackRe
 		}
 		origName := filepath.Base(filepath.FromSlash(r.toRel))
 
-		_, _ = s.sqlDB.ExecContext(ctx, `
-			UPDATE media_files SET relative_path = ?, parent_rel_path = ?, filename = ?, updated_at = ?
-			WHERE id = ?
-		`, r.toRel, origParent, origName, nowStr, r.fileID)
+		if r.fileID != "" {
+			_, _ = s.sqlDB.ExecContext(ctx, `
+				UPDATE media_files SET relative_path = ?, parent_rel_path = ?, filename = ?, presence_status = 'present', updated_at = ?
+				WHERE id = ?
+			`, r.toRel, origParent, origName, nowStr, r.fileID)
+		}
 		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE rollback_steps SET rollback_status = 'executed', executed_at = ? WHERE id = ?`, nowStr, r.rbID)
 		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE operation_journal SET operation_state = 'rolled_back' WHERE id = ?`, r.journalID)
 		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET decision_status = 'rolled_back' WHERE id = ?`, r.itemID)
 		res.RestoredCount++
 
-		cleanEmptyParentSafely(filepath.Dir(curFull), r.mountPath)
+		_, rootRel := s.resolveEnclosingRoot(ctx, r.diskID, r.fromRel)
+		stopBoundary := library.ResolveFullPath(r.mountPath, rootRel)
+		cleanEmptyParentChain(filepath.Dir(curFull), stopBoundary, nil)
 	}
 
 	res.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -366,6 +514,34 @@ func (s *Service) RollbackBatch(ctx context.Context, batchID string) (RollbackRe
 		fmt.Sprintf(`{"batchId":%q,"restored":%d}`, batchID, res.RestoredCount),
 	)
 	return res, nil
+}
+
+func (s *Service) resolveEnclosingRoot(ctx context.Context, diskID, itemRel string) (string, string) {
+	normItem := strings.Trim(filepath.ToSlash(itemRel), "/")
+	rows, err := s.sqlDB.QueryContext(ctx, `
+		SELECT id, relative_root_path FROM library_roots WHERE disk_id = ?
+	`, diskID)
+	if err != nil {
+		return "", ""
+	}
+	defer rows.Close()
+	bestID, bestRel := "", ""
+	for rows.Next() {
+		var rid, rrel string
+		if err := rows.Scan(&rid, &rrel); err == nil {
+			cleanR := strings.Trim(filepath.ToSlash(rrel), "/")
+			if cleanR == "." {
+				cleanR = ""
+			}
+			if cleanR == "" || normItem == cleanR || strings.HasPrefix(normItem, cleanR+"/") {
+				if bestID == "" || len(cleanR) > len(bestRel) {
+					bestID = rid
+					bestRel = cleanR
+				}
+			}
+		}
+	}
+	return bestID, bestRel
 }
 
 func (s *Service) ListJournalEntries(ctx context.Context, batchID string) ([]JournalEntryView, error) {
@@ -409,14 +585,37 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func cleanEmptyParentSafely(dirPath, mountPath string) {
-	cleanDir := filepath.Clean(dirPath)
-	cleanMount := filepath.Clean(mountPath)
-	if cleanDir == cleanMount || len(cleanDir) <= len(cleanMount)+2 {
+func cleanEmptyParentChain(dirPath, stopBoundaryDir string, preserveScheduled map[string]bool) {
+	cur := filepath.Clean(dirPath)
+	boundary := filepath.Clean(stopBoundaryDir)
+	for cur != "" && cur != "." && cur != boundary && len(cur) > len(boundary) {
+		if preserveScheduled != nil && preserveScheduled[cur] {
+			return
+		}
+		entries, err := os.ReadDir(cur)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if rmErr := os.Remove(cur); rmErr != nil {
+			return
+		}
+		cur = filepath.Dir(cur)
+	}
+}
+
+func pruneEmptyChildSubdirs(topDir string) {
+	cleanTop := filepath.Clean(topDir)
+	entries, err := os.ReadDir(cleanTop)
+	if err != nil {
 		return
 	}
-	entries, err := os.ReadDir(cleanDir)
-	if err == nil && len(entries) == 0 {
-		_ = os.Remove(cleanDir)
+	for _, e := range entries {
+		if e.IsDir() {
+			child := filepath.Join(cleanTop, e.Name())
+			pruneEmptyChildSubdirs(child)
+			if subEntries, sErr := os.ReadDir(child); sErr == nil && len(subEntries) == 0 {
+				_ = os.Remove(child)
+			}
+		}
 	}
 }

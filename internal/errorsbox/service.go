@@ -18,7 +18,7 @@ import (
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/fsops"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/library"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/naming"
-	"github.com/sadigking5-cmd/Estiraha-Next/internal/review"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/safetygate"
 )
 
 // OfficialRootFolderName is the managed error root directory inside a library root.
@@ -149,7 +149,7 @@ type EntryView struct {
 
 // MoveToErrorsRequest encapsulates a permit-gated move into `الأخطاء/<التصنيف>/`.
 type MoveToErrorsRequest struct {
-	Permit          review.ExecutionPermit
+	Permit          safetygate.ExecutionPermit
 	DiskID          string
 	RootID          string
 	MountPath       string
@@ -326,7 +326,7 @@ func (s *Service) MoveApprovedItem(ctx context.Context, req MoveToErrorsRequest)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := review.ValidatePermit(req.Permit); err != nil {
+	if err := safetygate.ValidatePermit(req.Permit); err != nil {
 		return EntryView{}, err
 	}
 	spec, err := LookupCategory(req.Category)

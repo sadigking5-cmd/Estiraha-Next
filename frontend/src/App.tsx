@@ -57,6 +57,12 @@ export function App(): React.JSX.Element {
   const [diag, setDiag] = useState<PlatformDiagnostics | null>(null);
   const [overview, setOverview] = useState<SystemOverview | null>(null);
   const [lastScanResult, setLastScanResult] = useState<ScanAndAnalyzeResult | null>(null);
+  const [brokenPosterUrls, setBrokenPosterUrls] = useState<Record<string, boolean>>({});
+
+  const markPosterBroken = (url: string) => {
+    if (!url) return;
+    setBrokenPosterUrls((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
+  };
 
   // Movies State (B3)
   const [movieQuery, setMovieQuery] = useState('');
@@ -646,7 +652,11 @@ export function App(): React.JSX.Element {
                         onClick={() => void startPlayback(cw.workId, cw.episodeId, cw.fileId)}
                       >
                         <div className="poster-art">
-                          {cw.posterUrl ? <img src={cw.posterUrl} alt={cw.title} /> : <span className="badge gold">▶ PLAY</span>}
+                          {cw.posterUrl && !brokenPosterUrls[cw.posterUrl] ? (
+                            <img src={cw.posterUrl} alt={cw.title} onError={() => markPosterBroken(cw.posterUrl)} />
+                          ) : (
+                            <span className="badge gold">▶ PLAY</span>
+                          )}
                         </div>
                         <div className="poster-body">
                           <div className="poster-title">{cw.title}</div>
@@ -739,8 +749,12 @@ export function App(): React.JSX.Element {
                 {moviesList.map((m) => (
                   <article key={m.id} className="poster-card" onClick={() => void openMovieDetail(m.id)}>
                     <div className="poster-art">
-                      {m.posterUrl ? (
-                        <img src={m.posterUrl} alt={m.canonicalFolderName} />
+                      {m.posterUrl && !brokenPosterUrls[m.posterUrl] ? (
+                        <img
+                          src={m.posterUrl}
+                          alt={m.canonicalFolderName}
+                          onError={() => markPosterBroken(m.posterUrl)}
+                        />
                       ) : (
                         <span className="badge gold">{m.productionYear || '????'}</span>
                       )}
@@ -900,7 +914,15 @@ export function App(): React.JSX.Element {
                 {seriesList.map((s) => (
                   <article key={s.id} className="poster-card" onClick={() => void openSeriesDetail(s.id)}>
                     <div className="poster-art">
-                      {s.posterUrl ? <img src={s.posterUrl} alt={s.canonicalFolderName} /> : <span className="badge gold">{s.seasonCount} Seasons</span>}
+                      {s.posterUrl && !brokenPosterUrls[s.posterUrl] ? (
+                        <img
+                          src={s.posterUrl}
+                          alt={s.canonicalFolderName}
+                          onError={() => markPosterBroken(s.posterUrl)}
+                        />
+                      ) : (
+                        <span className="badge gold">{s.seasonCount} Seasons</span>
+                      )}
                     </div>
                     <div className="poster-body">
                       <div className="poster-title">{s.canonicalFolderName}</div>

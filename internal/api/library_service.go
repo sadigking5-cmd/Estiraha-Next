@@ -16,6 +16,7 @@ import (
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/db"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/domain"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/duplicates"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/errorsbox"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/identify"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/library"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/movies"
@@ -113,6 +114,7 @@ type LibraryService struct {
 	dupSvc    *duplicates.Service
 	reviewSvc *review.Service
 	orgSvc    *organizer.Service
+	errBoxSvc *errorsbox.Service
 	reportSvc *reports.Service
 	playerSvc *player.Service
 }
@@ -128,6 +130,7 @@ func NewLibraryService(cfg config.Config, dbEngine *db.Engine, vault secrets.Vau
 	dpSvc := duplicates.NewService(sqlDB)
 	rvSvc := review.NewService(sqlDB)
 	ogSvc := organizer.NewService(sqlDB, bSvc)
+	ebSvc := errorsbox.NewService(sqlDB)
 	rpSvc := reports.NewService(sqlDB, srSvc)
 	plSvc := player.NewService(sqlDB)
 
@@ -146,6 +149,7 @@ func NewLibraryService(cfg config.Config, dbEngine *db.Engine, vault secrets.Vau
 		dupSvc:    dpSvc,
 		reviewSvc: rvSvc,
 		orgSvc:    ogSvc,
+		errBoxSvc: ebSvc,
 		reportSvc: rpSvc,
 		playerSvc: plSvc,
 	}
@@ -439,6 +443,29 @@ func (s *LibraryService) ListOperationJournal(batchID string) ([]organizer.Journ
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return s.orgSvc.ListJournalEntries(ctx, batchID)
+}
+
+func (s *LibraryService) ListErrorFolderCategories() []errorsbox.CategorySpec {
+	return errorsbox.AllCategories()
+}
+
+func (s *LibraryService) ListErrorFolderEntries(categoryFilter string) ([]errorsbox.EntryView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cat := errorsbox.CategoryCode(strings.TrimSpace(categoryFilter))
+	if cat == "all" {
+		cat = ""
+	}
+	return s.errBoxSvc.ListEntries(ctx, cat, "")
+}
+
+func (s *LibraryService) RestoreErrorFolderEntry(entryID string) (errorsbox.EntryView, error) {
+	if s.scanSvc.IsRunning() {
+		return errorsbox.EntryView{}, errors.New("safety lock: cannot restore files while a library scan is running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.errBoxSvc.RestoreEntry(ctx, strings.TrimSpace(entryID))
 }
 
 func (s *LibraryService) RefreshAndListHealthIssues(kindFilter string) ([]reports.HealthIssueView, error) {

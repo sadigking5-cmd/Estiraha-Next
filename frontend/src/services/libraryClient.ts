@@ -301,6 +301,38 @@ export interface ReviewItemView {
   conflictDetails: string;
   protectedShortsFile: boolean;
   linkedCompanions: string[];
+  itemFileKind?: string;
+  errorCategoryCode?: string;
+  safetyChecks?: string[];
+}
+
+export interface ErrorCategorySpec {
+  code: string;
+  folderAr: string;
+  titleEn: string;
+  description: string;
+}
+
+export interface ErrorFolderEntryView {
+  id: string;
+  diskId: string;
+  rootId: string;
+  fileId: string;
+  batchId: string;
+  journalId: string;
+  entryKind: string;
+  categoryCode: string;
+  categoryFolderAr: string;
+  originalRelPath: string;
+  errorRelPath: string;
+  itemName: string;
+  sizeBytes: number;
+  sha256Hash: string;
+  reasonAr: string;
+  reasonEn: string;
+  entryStatus: string;
+  movedAt: string;
+  restoredAt: string;
 }
 
 export interface JournalEntryView {
@@ -496,6 +528,12 @@ export const LibraryClient = {
     }>('RollbackBatch', batchId),
   listOperationJournal: (batchId: string) =>
     callLibrary<JournalEntryView[]>('ListOperationJournal', batchId),
+  listErrorFolderCategories: () =>
+    callLibrary<ErrorCategorySpec[]>('ListErrorFolderCategories'),
+  listErrorFolderEntries: (categoryFilter: string) =>
+    callLibrary<ErrorFolderEntryView[]>('ListErrorFolderEntries', categoryFilter),
+  restoreErrorFolderEntry: (entryId: string) =>
+    callLibrary<ErrorFolderEntryView>('RestoreErrorFolderEntry', entryId),
 
   refreshAndListHealthIssues: (kindFilter: string) =>
     callLibrary<HealthIssueView[]>('RefreshAndListHealthIssues', kindFilter),

@@ -147,7 +147,7 @@ func ClassifyFileKind(filename string) (ext string, kind string, supported bool)
 	case ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".ts", ".flv",
 		".rmvb", ".rm", ".divx", ".asf", ".vob":
 		return ext, "video", true
-	case ".srt", ".ass", ".ssa", ".vtt", ".sub":
+	case ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx":
 		return ext, "subtitle", true
 	case ".jpg", ".jpeg", ".png", ".webp":
 		return ext, "image", true

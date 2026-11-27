@@ -168,8 +168,8 @@ func TestBatch1ScannerIntelligenceFFProbeAndRuleGuards(t *testing.T) {
 	defer engine.Close()
 
 	ver, err := engine.Migrate(ctx, backupDir)
-	if err != nil || ver != 4 {
-		t.Fatalf("expected Migration 0004 (ver=4), got ver=%d err=%v", ver, err)
+	if err != nil || ver < 4 {
+		t.Fatalf("expected Migration >= 0004 (ver>=4), got ver=%d err=%v", ver, err)
 	}
 
 	libSvc := library.NewService(engine.SQL())

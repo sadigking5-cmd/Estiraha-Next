@@ -67,28 +67,36 @@ func TestPhaseBEndToEndMediaLibrarySafetyNamingPlayerBackupAndScale(t *testing.T
 		}
 	}
 
+	// Synthesize fast valid 120s feature seed clips so real ffprobe inspects genuine durations/streams cleanly
+	phaseBSeed720 := filepath.Join(tmp, "phaseb_seed_720p.mp4")
+	phaseBSeed1080 := filepath.Join(tmp, "phaseb_seed_1080p.mp4")
+	generateTestVideoWithFFmpeg(t, phaseBSeed720, 2, 1280, 720, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac")
+	generateTestVideoWithFFmpeg(t, phaseBSeed1080, 2, 1920, 1080, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac")
+
 	// Movie 1 (Arabic Movie + Subtitle + Poster + Protected .shorts!)
-	mustWriteFile(t, filepath.Join(drive1Movies, "الناظر.2000.1080p.WEB-DL.x265.mkv"), []byte("FAKE_VIDEO_AR_NAZER_1080P_HEVC_STREAM_PAYLOAD_0123456789"))
+	remuxFeatureClip(t, phaseBSeed1080, filepath.Join(drive1Movies, "الناظر.2000.1080p.WEB-DL.x265.mkv"))
 	mustWriteFile(t, filepath.Join(drive1Movies, "الناظر.2000.1080p.WEB-DL.x265.srt"), []byte("1\n00:00:01,000 --> 00:00:04,500\nمرحباً بكم في فيلم الناظر\n"))
 	mustWriteFile(t, filepath.Join(drive1Movies, "الناظر.2000.1080p.WEB-DL.x265.jpg"), []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'})
 	mustWriteFile(t, filepath.Join(drive1Movies, "الناظر.2000.1080p.WEB-DL.x265.shorts"), []byte("PROTECTED_SHORTS_COMPANION_DATA_NAZER"))
 
 	// Movie 2 (English Movie with Same-Disk Lower-Quality Duplicate + Cross-Disk Copy on DriveB!)
-	mustWriteFile(t, filepath.Join(drive1Movies, "The.Dark.Knight.(2008).2160p.4K.HDR10.HEVC.mkv"), []byte("DARK_KNIGHT_4K_HDR_MASTER_STREAM_PAYLOAD_999999999"))
-	mustWriteFile(t, filepath.Join(drive1Movies, "The.Dark.Knight.2008.720p.x264.mp4"), []byte("DARK_KNIGHT_720P_SAME_DISK_LOWER_COPY"))
-	mustWriteFile(t, filepath.Join(drive2Movies, "The.Dark.Knight.2008.1080p.BluRay.mkv"), []byte("DARK_KNIGHT_1080P_CROSS_DISK_KEEP_COPY"))
+	phaseBSeed4K := filepath.Join(tmp, "phaseb_seed_4k.mp4")
+	generateTestVideoWithFFmpeg(t, phaseBSeed4K, 2, 3840, 2160, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac")
+	remuxFeatureClip(t, phaseBSeed4K, filepath.Join(drive1Movies, "The.Dark.Knight.(2008).2160p.4K.HDR10.HEVC.mkv"))
+	remuxFeatureClip(t, phaseBSeed720, filepath.Join(drive1Movies, "The.Dark.Knight.2008.720p.x264.mp4"))
+	remuxFeatureClip(t, phaseBSeed1080, filepath.Join(drive2Movies, "The.Dark.Knight.2008.1080p.BluRay.mkv"))
 
 	// Unidentified / Ambiguous File ("Unidentified Files = Review") & Corrupted 0-byte File
-	mustWriteFile(t, filepath.Join(drive1Movies, "unknown_clip_no_year.mp4"), []byte("UNKNOWN_CLIP_BYTES"))
+	remuxFeatureClip(t, phaseBSeed720, filepath.Join(drive1Movies, "unknown_clip_no_year.mp4"))
 	mustWriteFile(t, filepath.Join(drive1Movies, "corrupted_zero_byte.mkv"), []byte{})
 
 	// Series with Season Gap (S01 & S03 -> S02 missing!), Episode Gap (E01 & E03 -> E02 missing!), Poster & .shorts!
 	mustWriteFile(t, filepath.Join(drive1Series, "Breaking.Bad.2008", "cover.jpg"), []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'})
-	mustWriteFile(t, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 1", "Breaking.Bad.S01E01.1080p.HEVC.mp4"), []byte("BB_S01E01_1080P_VIDEO_STREAM_CONTENT_ABCDEFGHIJKLMNOP"))
+	remuxFeatureClip(t, phaseBSeed1080, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 1", "Breaking.Bad.S01E01.1080p.HEVC.mp4"))
 	mustWriteFile(t, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 1", "Breaking.Bad.S01E01.1080p.HEVC.srt"), []byte("1\n00:00:02,000 --> 00:00:05,000\nSay my name.\n"))
 	mustWriteFile(t, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 1", "Breaking.Bad.S01E01.1080p.HEVC.shorts"), []byte("BB_EPISODE_SHORTS_PAYLOAD"))
-	mustWriteFile(t, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 1", "Breaking.Bad.S01E03.720p.mp4"), []byte("BB_S01E03_720P_VIDEO_STREAM"))
-	mustWriteFile(t, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 3", "Breaking.Bad.S03E01.1080p.mp4"), []byte("BB_S03E01_1080P_VIDEO_STREAM"))
+	remuxFeatureClip(t, phaseBSeed720, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 1", "Breaking.Bad.S01E03.720p.mp4"))
+	remuxFeatureClip(t, phaseBSeed1080, filepath.Join(drive1Series, "Breaking.Bad.2008", "Season 3", "Breaking.Bad.S03E01.1080p.mp4"))
 
 	// 2. Register Roots & Verify Duplicate/Nested Root Rejection (B1)
 	r1, err := libSvc.AddLibraryRoot(library.AddRootInput{FullPath: drive1Movies, ContentCategory: "movies", DisplayName: "أفلام عربية وعالمية", DiskLabel: "VaultDiskA"})

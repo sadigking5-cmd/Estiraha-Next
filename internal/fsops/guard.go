@@ -9,7 +9,7 @@ import (
 	"errors"
 	"os"
 
-	"github.com/sadigking5-cmd/Estiraha-Next/internal/review"
+	"github.com/sadigking5-cmd/Estiraha-Next/internal/safetygate"
 )
 
 var (
@@ -18,8 +18,8 @@ var (
 )
 
 // VerifySafeDestination ensures permit validity, source existence, and zero collision at destination.
-func VerifySafeDestination(permit review.ExecutionPermit, sourcePath, destPath string) error {
-	if err := review.ValidatePermit(permit); err != nil {
+func VerifySafeDestination(permit safetygate.ExecutionPermit, sourcePath, destPath string) error {
+	if err := safetygate.ValidatePermit(permit); err != nil {
 		return err
 	}
 	if _, err := os.Stat(sourcePath); err != nil {

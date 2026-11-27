@@ -444,6 +444,7 @@ func (s *Service) handleArtworkImage(w http.ResponseWriter, r *http.Request) {
 		SELECT d.mount_path, mf.relative_path, mf.extension
 		FROM media_files mf JOIN disks d ON d.id = mf.disk_id
 		WHERE mf.id = ? AND mf.file_kind = 'image'
+		  AND mf.is_apple_double = 0 AND mf.is_system_artifact = 0 AND mf.size_bytes > 0
 	`, fileID).Scan(&mountPath, &relPath, &ext); err != nil {
 		http.NotFound(w, r)
 		return
@@ -453,8 +454,14 @@ func (s *Service) handleArtworkImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported image format", http.StatusUnsupportedMediaType)
 		return
 	}
+	fullImgPath := library.ResolveFullPath(mountPath, relPath)
+	st, statErr := os.Stat(fullImgPath)
+	if statErr != nil || st.IsDir() || st.Size() <= 0 {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	http.ServeFile(w, r, library.ResolveFullPath(mountPath, relPath))
+	http.ServeFile(w, r, fullImgPath)
 }
 
 func ConvertSubtitleToWebVTT(content, ext string) string {
