@@ -7,8 +7,37 @@ import { Call } from '@wailsio/runtime';
 
 const SVC = 'github.com/sadigking5-cmd/Estiraha-Next/internal/api.LibraryService';
 
+export function isNativeWailsRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window as unknown as Record<string, unknown>;
+  return Boolean(w._wails || w.wails);
+}
+
+async function callHttpRpc<T>(servicePath: 'library' | 'poc', method: string, args: unknown[]): Promise<T> {
+  const resp = await fetch(`/api/rpc/${servicePath}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ args }),
+  });
+  const payload = (await resp.json()) as { result?: T; error?: string };
+  if (!resp.ok || payload.error) {
+    throw new Error(payload.error || `RPC ${servicePath}.${method} failed (${resp.status})`);
+  }
+  return payload.result as T;
+}
+
+export function callPoC<T>(fn: (...a: never[]) => Promise<T>, method: string, ...args: unknown[]): Promise<T> {
+  if (isNativeWailsRuntime()) {
+    return (fn as (...a: unknown[]) => Promise<T>)(...args);
+  }
+  return callHttpRpc<T>('poc', method, args);
+}
+
 function callLibrary<T>(method: string, ...args: unknown[]): Promise<T> {
-  return Call.ByName(`${SVC}.${method}`, ...args) as Promise<T>;
+  if (isNativeWailsRuntime()) {
+    return Call.ByName(`${SVC}.${method}`, ...args) as Promise<T>;
+  }
+  return callHttpRpc<T>('library', method, args);
 }
 
 export interface DashboardStats {
@@ -271,6 +300,7 @@ export interface ReviewBatchView {
   totalItems: number;
   approvedItems: number;
   pendingItems: number;
+  rejectedItems?: number;
   executedItems: number;
   approvedByUserAt: string;
   createdAt: string;
@@ -281,17 +311,26 @@ export interface ReviewItemView {
   batchId: string;
   fileId: string;
   workId: string;
+  workTitle?: string;
+  workMediaType?: string;
+  itemFileKind?: string;
+  mediaFileKind?: string;
   actionKind: string;
+  errorCategoryCode?: string;
   sourceDiskId: string;
   diskLabel: string;
   oldRelPath: string;
+  oldDirPath?: string;
   oldFullPath: string;
   oldName: string;
   targetDiskId: string;
   proposedRelPath: string;
+  proposedDirPath?: string;
   effectiveRelPath: string;
+  effectiveDirPath?: string;
   effectiveFullPath: string;
   proposedName: string;
+  effectiveName?: string;
   userEditedRelPath: string;
   userEditedName: string;
   reasonDescription: string;
@@ -301,9 +340,81 @@ export interface ReviewItemView {
   conflictDetails: string;
   protectedShortsFile: boolean;
   linkedCompanions: string[];
-  itemFileKind?: string;
-  errorCategoryCode?: string;
   safetyChecks?: string[];
+  fileSizeBytes?: number;
+  resolutionLabel?: string;
+  videoCodec?: string;
+  operationState?: string;
+}
+
+export interface ReviewItemDetailView {
+  item: ReviewItemView;
+  extension: string;
+  fileSha256: string;
+  durationSeconds: number;
+  videoWidth: number;
+  videoHeight: number;
+  probeStatus: string;
+  integrityStatus: string;
+  presenceStatus: string;
+  productionYear: number;
+  workStatus: string;
+  lastJournalMsg: string;
+}
+
+export interface ManifestStepSpec {
+  sequence: number;
+  reviewItemId: string;
+  fileId: string;
+  itemFileKind: string;
+  mediaFileKind: string;
+  actionKind: string;
+  errorCategoryCode: string;
+  diskId: string;
+  diskLabel: string;
+  mountPath: string;
+  rootId: string;
+  rootRelPath: string;
+  oldRelPath: string;
+  oldName: string;
+  effectiveRelPath: string;
+  effectiveName: string;
+  protectedShortsFile: boolean;
+  reasonDescription: string;
+  approvedAt: string;
+}
+
+export interface ExecutionManifestSummary {
+  batchId: string;
+  batchTitle: string;
+  batchStatus: string;
+  manifestSha256: string;
+  totalApprovedOperations: number;
+  filesToRename: number;
+  filesToMove: number;
+  foldersToCreate: number;
+  emptyFoldersToMoveErrors: number;
+  subtitlesToAssociate: number;
+  postersArtworkToAssociate: number;
+  shortsToPreserve: number;
+  unresolvedConflicts: number;
+  unchangedFilesCount: number;
+  targetFolders: string[];
+  steps: ManifestStepSpec[];
+}
+
+export interface ExecutionProgressView {
+  batchId: string;
+  running: boolean;
+  paused: boolean;
+  cancelRequested: boolean;
+  manifestId: string;
+  manifestSha256: string;
+  totalSteps: number;
+  currentStep: number;
+  currentItemName: string;
+  executedCount: number;
+  interruptedEntries: number;
 }
 
 export interface ErrorCategorySpec {
@@ -316,15 +427,19 @@ export interface ErrorCategorySpec {
 export interface ErrorFolderEntryView {
   id: string;
   diskId: string;
+  diskLabel?: string;
   rootId: string;
   fileId: string;
   batchId: string;
+  batchTitle?: string;
   journalId: string;
   entryKind: string;
   categoryCode: string;
   categoryFolderAr: string;
   originalRelPath: string;
+  originalFullPath?: string;
   errorRelPath: string;
+  errorFullPath?: string;
   itemName: string;
   sizeBytes: number;
   sha256Hash: string;
@@ -335,9 +450,18 @@ export interface ErrorFolderEntryView {
   restoredAt: string;
 }
 
+export interface BatchRestoreSummary {
+  restoredCount: number;
+  blockedCount: number;
+  restoredItems: ErrorFolderEntryView[];
+  errors: string[];
+  completedAt: string;
+}
+
 export interface JournalEntryView {
   id: string;
   batchId: string;
+  reviewItemId?: string;
   stepSequence: number;
   operationState: string;
   sourcePath: string;
@@ -505,19 +629,54 @@ export const LibraryClient = {
     decision: string;
     userEditedRelPath: string;
     userEditedName: string;
+    userEditedDirPath?: string;
   }) => callLibrary<ReviewItemView>('DecideReviewItem', input),
+  bulkDecideReviewItems: (input: {
+    batchId: string;
+    itemIds: string[];
+    decision: string;
+  }) =>
+    callLibrary<{
+      batchId: string;
+      updatedCount: number;
+      skippedCount: number;
+      warnings: string[];
+    }>('BulkDecideReviewItems', input),
+  getReviewItemDetails: (itemId: string) =>
+    callLibrary<ReviewItemDetailView>('GetReviewItemDetails', itemId),
+  getExecutionManifestSummary: (batchId: string) =>
+    callLibrary<ExecutionManifestSummary>('GetExecutionManifestSummary', batchId),
   approveAllSafeReviewItems: (batchId: string) =>
     callLibrary<ReviewBatchView>('ApproveAllSafeReviewItems', batchId),
   executeApprovedBatch: (batchId: string) =>
     callLibrary<{
       batchId: string;
+      manifestId: string;
+      manifestSha256: string;
       preBatchBackupId: string;
       executedCount: number;
       skippedCount: number;
       abortedCount: number;
+      cancelled: boolean;
+      remainingCount: number;
       errors: string[];
       completedAt: string;
     }>('ExecuteApprovedBatch', batchId),
+  pauseBatchExecution: () => callLibrary<boolean>('PauseBatchExecution'),
+  resumeBatchExecution: () => callLibrary<boolean>('ResumeBatchExecution'),
+  cancelBatchExecution: () => callLibrary<boolean>('CancelBatchExecution'),
+  getBatchExecutionProgress: (batchId: string) =>
+    callLibrary<ExecutionProgressView>('GetBatchExecutionProgress', batchId),
+  recoverInterruptedBatch: (batchId: string) =>
+    callLibrary<{
+      batchId: string;
+      inspectedJournalIds: string[];
+      finalizedCount: number;
+      requeuedCount: number;
+      restoredCleanCount: number;
+      notes: string[];
+      completedAt: string;
+    }>('RecoverInterruptedBatch', batchId),
   rollbackBatch: (batchId: string) =>
     callLibrary<{
       batchId: string;
@@ -532,8 +691,14 @@ export const LibraryClient = {
     callLibrary<ErrorCategorySpec[]>('ListErrorFolderCategories'),
   listErrorFolderEntries: (categoryFilter: string) =>
     callLibrary<ErrorFolderEntryView[]>('ListErrorFolderEntries', categoryFilter),
+  inspectErrorFolderEntry: (entryId: string) =>
+    callLibrary<ErrorFolderEntryView>('InspectErrorFolderEntry', entryId),
   restoreErrorFolderEntry: (entryId: string) =>
     callLibrary<ErrorFolderEntryView>('RestoreErrorFolderEntry', entryId),
+  restoreSelectedErrorFolderEntries: (entryIds: string[]) =>
+    callLibrary<BatchRestoreSummary>('RestoreSelectedErrorFolderEntries', entryIds),
+  restoreErrorFolderBatch: (batchId: string) =>
+    callLibrary<BatchRestoreSummary>('RestoreErrorFolderBatch', batchId),
 
   refreshAndListHealthIssues: (kindFilter: string) =>
     callLibrary<HealthIssueView[]>('RefreshAndListHealthIssues', kindFilter),

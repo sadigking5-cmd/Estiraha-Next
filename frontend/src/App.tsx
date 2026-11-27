@@ -6,16 +6,23 @@ import { LOCALES } from './i18n/locale';
 import type { LanguageCode, ThemeMode } from './services/contracts';
 import {
   LibraryClient,
+  callPoC,
+  isNativeWailsRuntime,
   type AIAssistResponse,
   type AuditLogView,
   type BackupRecord,
   type DuplicateGroupView,
+  type ErrorCategorySpec,
+  type ErrorFolderEntryView,
+  type ExecutionManifestSummary,
+  type ExecutionProgressView,
   type HealthIssueView,
   type JournalEntryView,
   type MovieItem,
   type PlaybackSession,
   type ProviderStatusView,
   type ReviewBatchView,
+  type ReviewItemDetailView,
   type ReviewItemView,
   type ScanAndAnalyzeResult,
   type SeriesItem,
@@ -29,6 +36,7 @@ type WorkspaceKey =
   | 'disks'
   | 'review'
   | 'organizer'
+  | 'errors'
   | 'ai'
   | 'player'
   | 'reports'
@@ -93,13 +101,28 @@ export function App(): React.JSX.Element {
   const [newDiskLabel, setNewDiskLabel] = useState('');
   const [scanComputeHash, setScanComputeHash] = useState(true);
 
-  // Review Center & Smart Organizer State (B5, B6, B7, B8)
+  // Review Center, Execution Dashboard & Error Center State (Batch 3)
   const [batches, setBatches] = useState<ReviewBatchView[]>([]);
   const [activeBatchId, setActiveBatchId] = useState('');
   const [batchItems, setBatchItems] = useState<ReviewItemView[]>([]);
+  const [manifestSummary, setManifestSummary] = useState<ExecutionManifestSummary | null>(null);
+  const [execProgress, setExecProgress] = useState<ExecutionProgressView | null>(null);
+  const [selectedReviewIds, setSelectedReviewIds] = useState<Record<string, boolean>>({});
+  const [reviewFilterStatus, setReviewFilterStatus] = useState<string>('all');
+  const [editTargetModalItem, setEditTargetModalItem] = useState<ReviewItemView | null>(null);
+  const [modalEditName, setModalEditName] = useState('');
+  const [modalEditDir, setModalEditDir] = useState('');
+  const [detailModalData, setDetailModalData] = useState<ReviewItemDetailView | null>(null);
+
+  // Error Center State (6 Official Categories)
+  const [errorCategories, setErrorCategories] = useState<ErrorCategorySpec[]>([]);
+  const [activeErrorCategory, setActiveErrorCategory] = useState<string>('all');
+  const [errorEntries, setErrorEntries] = useState<ErrorFolderEntryView[]>([]);
+  const [selectedErrorIds, setSelectedErrorIds] = useState<Record<string, boolean>>({});
+  const [inspectedErrorEntry, setInspectedErrorEntry] = useState<ErrorFolderEntryView | null>(null);
+
   const [dupGroups, setDupGroups] = useState<DuplicateGroupView[]>([]);
   const [journalEntries, setJournalEntries] = useState<JournalEntryView[]>([]);
-  const [inlineEditNames, setInlineEditNames] = useState<Record<string, string>>({});
   const [namingSampleTitle, setNamingSampleTitle] = useState('الناظر');
   const [namingSampleYear, setNamingSampleYear] = useState(2000);
   const [namingPreviewOut, setNamingPreviewOut] = useState<string>('');
@@ -138,12 +161,16 @@ export function App(): React.JSX.Element {
 
   const refreshCore = async () => {
     try {
-      const [d, ov] = await Promise.all([
-        PoCService.GetPlatformDiagnostics(),
+      const [d, ov, errCats, errItems] = await Promise.all([
+        callPoC(PoCService.GetPlatformDiagnostics, 'GetPlatformDiagnostics'),
         LibraryClient.getSystemOverview(),
+        LibraryClient.listErrorFolderCategories(),
+        LibraryClient.listErrorFolderEntries('all'),
       ]);
       setDiag(d);
       setOverview(ov);
+      setErrorCategories(errCats);
+      setErrorEntries(errItems);
     } catch (err: unknown) {
       notify('err', String(err));
     }
@@ -151,6 +178,7 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     void refreshCore();
+    if (!isNativeWailsRuntime()) return;
     const offProg = Events.On('estiraha:scan-progress', (ev: unknown) => {
       notify('ok', `${isAr ? 'جاري الفحص اليدوي...' : 'Manual scan in progress...'} ${JSON.stringify(ev)}`);
     });
@@ -167,6 +195,7 @@ export function App(): React.JSX.Element {
     if (tab === 'movies') void loadMovies();
     if (tab === 'series') void loadSeries();
     if (tab === 'review' || tab === 'organizer') void loadReviewAndOrganizer();
+    if (tab === 'errors') void loadErrorCenter(activeErrorCategory);
     if (tab === 'reports') void loadIssues(issueFilter);
     if (tab === 'settings') void loadSettingsData();
   }, [tab]);
@@ -334,22 +363,45 @@ export function App(): React.JSX.Element {
 
   const loadReviewAndOrganizer = async (preferredBatchId?: string) => {
     try {
-      const [bList, dGroups, jList] = await Promise.all([
+      const [bList, dGroups, jList, errItems] = await Promise.all([
         LibraryClient.listReviewBatches(),
         LibraryClient.listDuplicateGroups(),
         LibraryClient.listOperationJournal(''),
+        LibraryClient.listErrorFolderEntries('all'),
       ]);
       setBatches(bList);
       setDupGroups(dGroups);
       setJournalEntries(jList);
+      setErrorEntries(errItems);
       const targetId = preferredBatchId || activeBatchId || (bList[0]?.id ?? '');
       if (targetId) {
         setActiveBatchId(targetId);
-        const items = await LibraryClient.listReviewBatchItems(targetId);
+        const [items, manifest, prog] = await Promise.all([
+          LibraryClient.listReviewBatchItems(targetId),
+          LibraryClient.getExecutionManifestSummary(targetId),
+          LibraryClient.getBatchExecutionProgress(targetId),
+        ]);
         setBatchItems(items);
+        setManifestSummary(manifest);
+        setExecProgress(prog);
       } else {
         setBatchItems([]);
+        setManifestSummary(null);
+        setExecProgress(null);
       }
+    } catch (err: unknown) {
+      notify('err', String(err));
+    }
+  };
+
+  const loadErrorCenter = async (catCode = 'all') => {
+    try {
+      const [cats, list] = await Promise.all([
+        LibraryClient.listErrorFolderCategories(),
+        LibraryClient.listErrorFolderEntries(catCode),
+      ]);
+      setErrorCategories(cats);
+      setErrorEntries(list);
     } catch (err: unknown) {
       notify('err', String(err));
     }
@@ -359,6 +411,7 @@ export function App(): React.JSX.Element {
     setBusy(true);
     try {
       const batch = await LibraryClient.generateOrganizationPlan('');
+      setSelectedReviewIds({});
       await loadReviewAndOrganizer(batch.id);
       setTab('review');
       notify('ok', isAr ? `تم إنشاء خطة معاينة غير مدمرة (${batch.totalItems} عنصر بانتظار موافقتك).` : `Created non-destructive preview plan (${batch.totalItems} items awaiting explicit approval).`);
@@ -371,14 +424,93 @@ export function App(): React.JSX.Element {
 
   const handleDecideItem = async (item: ReviewItemView, decision: string) => {
     try {
-      const customName = inlineEditNames[item.id] ?? '';
       await LibraryClient.decideReviewItem({
         itemId: item.id,
         decision,
         userEditedRelPath: '',
-        userEditedName: customName,
+        userEditedName: '',
       });
       await loadReviewAndOrganizer(item.batchId);
+    } catch (err: unknown) {
+      notify('err', String(err));
+    }
+  };
+
+  const handleSelectAllReview = (visibleItems: ReviewItemView[]) => {
+    const next: Record<string, boolean> = {};
+    for (const it of visibleItems) {
+      if (it.decisionStatus !== 'executed') {
+        next[it.id] = true;
+      }
+    }
+    setSelectedReviewIds(next);
+  };
+
+  const handleDeselectAllReview = () => {
+    setSelectedReviewIds({});
+  };
+
+  const handleBulkReviewDecision = async (decision: 'approved' | 'rejected') => {
+    if (!activeBatchId) return;
+    const ids = Object.keys(selectedReviewIds).filter((k) => selectedReviewIds[k]);
+    if (ids.length === 0) {
+      notify('err', isAr ? 'يرجى تحديد عنصر واحد على الأقل أولاً.' : 'Please select at least one item first.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await LibraryClient.bulkDecideReviewItems({
+        batchId: activeBatchId,
+        itemIds: ids,
+        decision,
+      });
+      await loadReviewAndOrganizer(activeBatchId);
+      notify(
+        'ok',
+        isAr
+          ? `تم تحديث ${res.updatedCount} عنصر محدد إلى (${decision === 'approved' ? 'معتمد' : 'مرفوض'})${res.skippedCount > 0 ? ` — استُبعد ${res.skippedCount} لوجود تعارض` : ''}.`
+          : `Updated ${res.updatedCount} selected item(s) to ${decision}${res.skippedCount > 0 ? ` (${res.skippedCount} skipped due to conflict)` : ''}.`
+      );
+    } catch (err: unknown) {
+      notify('err', String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openEditTargetModal = (item: ReviewItemView) => {
+    setEditTargetModalItem(item);
+    setModalEditName(item.effectiveName || item.userEditedName || item.proposedName);
+    const dirVal = item.effectiveDirPath || item.proposedDirPath || '';
+    setModalEditDir(dirVal === '/' ? '' : dirVal);
+  };
+
+  const handleSaveEditedTarget = async () => {
+    if (!editTargetModalItem) return;
+    setBusy(true);
+    try {
+      const nextStatus = editTargetModalItem.decisionStatus === 'executed' ? 'pending' : editTargetModalItem.decisionStatus;
+      await LibraryClient.decideReviewItem({
+        itemId: editTargetModalItem.id,
+        decision: nextStatus,
+        userEditedRelPath: '',
+        userEditedName: modalEditName.trim(),
+        userEditedDirPath: modalEditDir.trim(),
+      });
+      setEditTargetModalItem(null);
+      await loadReviewAndOrganizer(editTargetModalItem.batchId);
+      notify('ok', isAr ? 'تم حفظ الاسم والمجلد المقترح الجديد والتحقق الفوري من عدم وجود تعارض.' : 'Updated proposed filename and destination folder with live collision check.');
+    } catch (err: unknown) {
+      notify('err', String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOpenItemDetails = async (itemId: string) => {
+    try {
+      const details = await LibraryClient.getReviewItemDetails(itemId);
+      setDetailModalData(details);
     } catch (err: unknown) {
       notify('err', String(err));
     }
@@ -390,7 +522,7 @@ export function App(): React.JSX.Element {
     try {
       await LibraryClient.approveAllSafeReviewItems(activeBatchId);
       await loadReviewAndOrganizer(activeBatchId);
-      notify('ok', isAr ? 'تم اعتماد العناصر الآمنة الخالية من التعارض؛ يمكنك الآن التنفيذ من المنظم الذكي.' : 'Approved all safe conflict-free items; ready to execute in Smart Organizer.');
+      notify('ok', isAr ? 'تم اعتماد العناصر الآمنة الخالية من التعارض؛ راجع ملخص العمليات ثم اضغط تنفيذ التغييرات المعتمدة.' : 'Approved all safe conflict-free items; review the manifest summary and click Execute Approved Changes.');
     } catch (err: unknown) {
       notify('err', String(err));
     } finally {
@@ -407,8 +539,64 @@ export function App(): React.JSX.Element {
       notify(
         'ok',
         isAr
-          ? `تم تنفيذ الدفعة بأمان بعد أخذ نسخة احتياطية موثقة: نُفذ ${res.executedCount} عملية مع التحقق من SHA-256.`
-          : `Executed batch safely after verified pre-batch backup: ${res.executedCount} verified SHA-256 operations.`
+          ? `اكتمل تنفيذ البيان المعتمد [${res.manifestSha256.slice(0, 10)}]: نُفذت ${res.executedCount} عملية بتحقق SHA-256 كامل ونسخة احتياطية مسبقة.`
+          : `Executed immutable manifest [${res.manifestSha256.slice(0, 10)}]: ${res.executedCount} SHA-256 verified operations after pre-batch backup.`
+      );
+    } catch (err: unknown) {
+      await loadReviewAndOrganizer(batchId);
+      notify('err', String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePauseExecution = async () => {
+    try {
+      await LibraryClient.pauseBatchExecution();
+      if (activeBatchId) {
+        setExecProgress(await LibraryClient.getBatchExecutionProgress(activeBatchId));
+      }
+      notify('ok', isAr ? 'تم إيقاف التنفيذ مؤقتاً بأمان عند حد العملية الحالية.' : 'Execution safely paused at step boundary.');
+    } catch (err: unknown) {
+      notify('err', String(err));
+    }
+  };
+
+  const handleResumeExecution = async () => {
+    try {
+      await LibraryClient.resumeBatchExecution();
+      if (activeBatchId) {
+        setExecProgress(await LibraryClient.getBatchExecutionProgress(activeBatchId));
+      }
+      notify('ok', isAr ? 'تم استئناف التنفيذ الآمن.' : 'Execution resumed.');
+    } catch (err: unknown) {
+      notify('err', String(err));
+    }
+  };
+
+  const handleCancelExecution = async () => {
+    try {
+      await LibraryClient.cancelBatchExecution();
+      if (activeBatchId) {
+        await loadReviewAndOrganizer(activeBatchId);
+      }
+      notify('ok', isAr ? 'تم إلغاء العمليات المتبقية بأمان مع بقاء التراجع متاحاً لما نُفذ.' : 'Safely cancelled remaining steps; executed steps remain reversible.');
+    } catch (err: unknown) {
+      notify('err', String(err));
+    }
+  };
+
+  const handleRecoverBatch = async (batchId: string) => {
+    setBusy(true);
+    try {
+      const rec = await LibraryClient.recoverInterruptedBatch(batchId);
+      await loadReviewAndOrganizer(batchId);
+      await refreshCore();
+      notify(
+        'ok',
+        isAr
+          ? `اكتملت استعادة الدفعة المتوقفة: حُسمت ${rec.finalizedCount} عملية وأُعيدت جدولة ${rec.requeuedCount} عملية بأمان دون فقد أي ملف.`
+          : `Recovered interrupted batch: finalized ${rec.finalizedCount}, safely requeued ${rec.requeuedCount} with zero file loss.`
       );
     } catch (err: unknown) {
       notify('err', String(err));
@@ -423,7 +611,57 @@ export function App(): React.JSX.Element {
       const res = await LibraryClient.rollbackBatch(batchId);
       await loadReviewAndOrganizer(batchId);
       await refreshCore();
-      notify('ok', isAr ? `تم التراجع الكامل واستعادة ${res.restoredCount} ملف إلى مساراتها الأصلية.` : `Rolled back batch: restored ${res.restoredCount} file(s) to original paths.`);
+      notify('ok', isAr ? `تم التراجع الكامل الموثق واستعادة ${res.restoredCount} عنصر إلى مساراتها الأصلية مع التحقق من SHA-256.` : `Verified rollback complete: restored ${res.restoredCount} item(s) to exact original paths with SHA-256 check.`);
+    } catch (err: unknown) {
+      notify('err', String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestoreSingleErrorEntry = async (entryId: string) => {
+    setBusy(true);
+    try {
+      const ev = await LibraryClient.restoreErrorFolderEntry(entryId);
+      await loadErrorCenter(activeErrorCategory);
+      await refreshCore();
+      notify('ok', isAr ? `تم استرجاع (${ev.itemName}) إلى موقعه الأصلي بنجاح.` : `Restored (${ev.itemName}) to its exact original location.`);
+    } catch (err: unknown) {
+      notify('err', String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestoreSelectedErrorEntries = async () => {
+    const ids = Object.keys(selectedErrorIds).filter((k) => selectedErrorIds[k]);
+    if (ids.length === 0) {
+      notify('err', isAr ? 'اختر عنصراً واحداً على الأقل للاسترجاع.' : 'Select at least one item to restore.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await LibraryClient.restoreSelectedErrorFolderEntries(ids);
+      setSelectedErrorIds({});
+      await loadErrorCenter(activeErrorCategory);
+      await refreshCore();
+      notify('ok', isAr ? `تم استرجاع ${res.restoredCount} عنصر محدد إلى مساراتها الأصلية.` : `Restored ${res.restoredCount} selected item(s) to original paths.`);
+    } catch (err: unknown) {
+      notify('err', String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestoreErrorBatch = async (batchId: string) => {
+    if (!batchId) return;
+    setBusy(true);
+    try {
+      const res = await LibraryClient.restoreErrorFolderBatch(batchId);
+      setSelectedErrorIds({});
+      await loadErrorCenter(activeErrorCategory);
+      await refreshCore();
+      notify('ok', isAr ? `تم استرجاع كامل دفعة الأخطاء (${res.restoredCount} عنصر) بأمان.` : `Restored complete reversible error batch (${res.restoredCount} item(s)).`);
     } catch (err: unknown) {
       notify('err', String(err));
     } finally {
@@ -511,20 +749,23 @@ export function App(): React.JSX.Element {
     const next: LanguageCode = lang === 'ar' ? 'en' : 'ar';
     setLang(next);
     try {
-      const updated = await PoCService.SetActiveLocale(next);
+      const updated = await callPoC(PoCService.SetActiveLocale, 'SetActiveLocale', next);
       setDiag(updated);
     } catch {
       // ignore
     }
   };
 
+  const activeErrorCount = errorEntries.filter((e) => e.entryStatus === 'active').length;
+
   const navItems: Array<{ key: WorkspaceKey; ar: string; en: string; badge?: number }> = [
     { key: 'dashboard', ar: 'لوحة القيادة السينمائية', en: 'Main Dashboard' },
     { key: 'movies', ar: 'مكتبة الأفلام', en: 'Movies Library', badge: overview?.stats.totalMovies },
     { key: 'series', ar: 'مكتبة المسلسلات والحلقات', en: 'Series & Episodes', badge: overview?.stats.totalSeries },
     { key: 'disks', ar: 'الأقراص ومسارات التخزين', en: 'Drives & Paths', badge: overview?.stats.totalRoots },
-    { key: 'review', ar: 'مركز المراجعة الذكي', en: 'Smart Review Center', badge: overview?.stats.pendingReviewBatches },
-    { key: 'organizer', ar: 'المنظم الذكي والتراجع', en: 'Smart Organizer' },
+    { key: 'review', ar: 'مركز المراجعة والاعتماد', en: 'Smart Review Center', badge: overview?.stats.pendingReviewBatches },
+    { key: 'organizer', ar: 'لوحة التنفيذ والتراجع', en: 'Execution & Rollback' },
+    { key: 'errors', ar: 'مركز الأخطاء والاسترجاع', en: 'Error Center (الأخطاء)', badge: activeErrorCount },
     { key: 'player', ar: 'المشغل المدمج', en: 'Integrated Player', badge: overview?.stats.watchingNowCount },
     { key: 'reports', ar: 'النواقص وصحة المكتبة', en: 'Reports & Missing' },
     { key: 'ai', ar: 'المساعد الذكي', en: 'AI Assistant' },
@@ -562,10 +803,10 @@ export function App(): React.JSX.Element {
           <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {isAr ? `المظهر: ${theme === 'dark' ? 'داكن سينمائي' : 'فاتح إداري'}` : `Theme: ${theme.toUpperCase()}`}
           </button>
-          <button onClick={() => void PoCService.HideWindowToTray()}>
+          <button onClick={() => void callPoC(PoCService.HideWindowToTray, 'HideWindowToTray')}>
             {isAr ? 'إخفاء إلى System Tray' : 'Minimize to System Tray'}
           </button>
-          <button className="danger" onClick={() => void PoCService.RequestCleanQuit()}>
+          <button className="danger" onClick={() => void callPoC(PoCService.RequestCleanQuit, 'RequestCleanQuit')}>
             {isAr ? 'خروج آمن نظيف' : 'Quit Cleanly'}
           </button>
         </div>
@@ -1151,234 +1392,722 @@ export function App(): React.JSX.Element {
           </section>
         )}
 
-        {/* 5. SMART REVIEW CENTER */}
-        {tab === 'review' && (
-          <section className="panel">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-              <h2>{isAr ? 'مركز المراجعة والاعتماد الإلزامي (لا يُعدّل أي ملف بدون موافقتك)' : 'Smart Review Center (Zero File Changes Without Approval)'}</h2>
-              <div className="btn-row">
-                <button className="primary" onClick={() => void handleGeneratePlan()} disabled={busy}>
-                  {isAr ? 'توليد خطة معاينة جديدة' : 'Generate Fresh Plan'}
-                </button>
-                <button onClick={() => void handleApproveAllSafe()} disabled={busy || !activeBatchId}>
-                  ✓ {isAr ? 'اعتماد كل العمليات الآمنة' : 'Approve All Safe Items'}
-                </button>
-                <button onClick={() => setTab('organizer')}>
-                  {isAr ? 'الانتقال للتنفيذ / التراجع ←' : 'Go to Execute / Rollback →'}
-                </button>
-              </div>
-            </div>
+        {/* 5. SMART REVIEW CENTER (Batch 3 Professional Review Center) */}
+        {tab === 'review' && (() => {
+          const visibleItems = batchItems.filter((it) =>
+            reviewFilterStatus === 'all' ? true : it.decisionStatus === reviewFilterStatus
+          );
+          const selectedCount = Object.values(selectedReviewIds).filter(Boolean).length;
+          const activeBatchObj = batches.find((b) => b.id === activeBatchId) ?? null;
 
-            <div className="btn-row">
-              <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>{isAr ? 'الدفعة النشطة:' : 'Active Batch:'}</span>
-              <select
-                className="input"
-                value={activeBatchId}
-                onChange={(e) => void loadReviewAndOrganizer(e.target.value)}
-              >
-                {batches.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.title} [{b.batchStatus}] ({b.approvedItems}/{b.totalItems})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <table className="admin-table">
-              <thead>
-                <tr>
-                  <th>{isAr ? 'المسار الحالي (قبل)' : 'Current Path (Before)'}</th>
-                  <th>{isAr ? 'المسار الرسمي المقترح (بعد)' : 'Proposed Canonical Path (After)'}</th>
-                  <th>{isAr ? 'السبب والثقة' : 'Reason & Confidence'}</th>
-                  <th>{isAr ? 'تعديل يدوي للاسم' : 'Manual Override'}</th>
-                  <th>{isAr ? 'القرار' : 'Decision'}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {batchItems.map((it) => (
-                  <tr key={it.id}>
-                    <td className="mono">{it.oldRelPath}</td>
-                    <td className="mono">
-                      <strong>{it.effectiveRelPath}</strong>
-                      {it.protectedShortsFile && (
-                        <span className="badge gold" style={{ marginInlineStart: '6px' }}>
-                          .shorts محمي
-                        </span>
-                      )}
-                      {it.conflictDetected && (
-                        <div className="badge err" style={{ marginTop: '4px' }}>
-                          {it.conflictDetails || 'Conflict'}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <div>{it.reasonDescription}</div>
-                      <span className="badge ok">{Math.round(it.confidenceScore * 100)}%</span>
-                    </td>
-                    <td>
-                      <input
-                        className="input"
-                        placeholder={it.proposedName}
-                        value={inlineEditNames[it.id] ?? ''}
-                        onChange={(e) => setInlineEditNames({ ...inlineEditNames, [it.id]: e.target.value })}
-                      />
-                    </td>
-                    <td>
-                      <div className="btn-row">
-                        <span className={`badge ${it.decisionStatus === 'approved' || it.decisionStatus === 'executed' ? 'ok' : it.decisionStatus === 'rejected' ? 'err' : 'warn'}`}>
-                          {it.decisionStatus}
-                        </span>
-                        {it.decisionStatus !== 'executed' && (
-                          <>
-                            <button
-                              className="primary"
-                              disabled={it.conflictDetected}
-                              onClick={() => void handleDecideItem(it, 'approved')}
-                            >
-                              ✓
-                            </button>
-                            <button onClick={() => void handleDecideItem(it, 'deferred')}>⏸</button>
-                            <button className="danger" onClick={() => void handleDecideItem(it, 'rejected')}>✕</button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        )}
-
-        {/* 6. SMART ORGANIZER, DUPLICATES & ROLLBACK */}
-        {tab === 'organizer' && (
-          <>
-            <section className="panel">
-              <h2>{isAr ? 'المنظم الذكي وسجل العمليات القابلة للتراجع (SHA-256 Verified)' : 'Smart Organizer, Execution & 1-Click Rollback'}</h2>
-              <div className="btn-row">
-                <input
-                  className="input"
-                  value={namingSampleTitle}
-                  onChange={(e) => setNamingSampleTitle(e.target.value)}
-                  placeholder="Movie / Series Title"
-                />
-                <input
-                  type="number"
-                  className="input"
-                  style={{ width: '100px' }}
-                  value={namingSampleYear}
-                  onChange={(e) => setNamingSampleYear(Number(e.target.value))}
-                />
-                <button
-                  onClick={() =>
-                    void LibraryClient.previewNamingRules(namingSampleTitle, namingSampleYear, false, 1, 1).then((r) =>
-                      setNamingPreviewOut(JSON.stringify(r, null, 2))
-                    )
-                  }
-                >
-                  {isAr ? 'معاينة تسمية فيلم + .shorts' : 'Preview Movie + .shorts Rule'}
-                </button>
-                <button
-                  onClick={() =>
-                    void LibraryClient.previewNamingRules(namingSampleTitle, namingSampleYear, true, 1, 1).then((r) =>
-                      setNamingPreviewOut(JSON.stringify(r, null, 2))
-                    )
-                  }
-                >
-                  {isAr ? 'معاينة تسمية مسلسل S01/01' : 'Preview Series S01/01 Rule'}
-                </button>
-              </div>
-              {namingPreviewOut && <pre className="mono" style={{ background: 'var(--bg-primary)', padding: '10px', borderRadius: '8px' }}>{namingPreviewOut}</pre>}
-
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>{isAr ? 'الدفعة' : 'Batch'}</th>
-                    <th>{isAr ? 'الحالة' : 'Status'}</th>
-                    <th>{isAr ? 'المعتمد / الإجمالي' : 'Approved / Total'}</th>
-                    <th>{isAr ? 'التنفيذ الآمن أو التراجع الكامل' : 'Safe Execute / Full Rollback'}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {batches.map((b) => (
-                    <tr key={b.id}>
-                      <td>{b.title}</td>
-                      <td><span className="badge gold">{b.batchStatus}</span></td>
-                      <td>{b.approvedItems} / {b.totalItems} (Executed: {b.executedItems})</td>
-                      <td className="btn-row">
-                        <button
-                          className="primary"
-                          disabled={busy || b.approvedItems === 0 || b.batchStatus === 'completed'}
-                          onClick={() => void handleExecuteBatch(b.id)}
-                        >
-                          {isAr ? 'تنفيذ العناصر المعتمدة الآن' : 'Execute Approved Items'}
-                        </button>
-                        {b.executedItems > 0 && b.batchStatus !== 'rolled_back' && (
-                          <button className="danger" disabled={busy} onClick={() => void handleRollbackBatch(b.id)}>
-                            ↺ {isAr ? 'تراجع كامل (Rollback)' : '1-Click Rollback'}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
-
-            <div className="split-layout">
-              <section className="panel">
-                <h2>{isAr ? 'تحليل التكرارات واختيار أفضل نسخة (Cross-Disk = Keep)' : 'Duplicates & Best-Version Selection (Cross-Disk = Keep)'}</h2>
-                {dupGroups.length === 0 ? (
-                  <p style={{ color: 'var(--text-muted)', fontSize: '0.86rem' }}>
-                    {isAr ? 'لا توجد مجموعات تكرار مرصودة حالياً.' : 'No duplicate groups detected.'}
+          return (
+            <section className="panel" id="review-center-panel">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                <div>
+                  <h2>
+                    {isAr
+                      ? 'مركز المراجعة الاحترافي والاعتماد الإلزامي (لا يُعدّل أي ملف بدون موافقتك)'
+                      : 'Professional Review Center (Zero File Changes Without Explicit Approval)'}
+                  </h2>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                    {isAr
+                      ? 'راجع الاسم الأصلي والمقترح والمجلدات ونوع الملف والعمل المرتبط وفحوص السلامة والتعارضات قبل الاعتماد.'
+                      : 'Inspect original/proposed filenames, directories, file types, linked works, safety checks, and conflicts before approval.'}
                   </p>
-                ) : (
-                  dupGroups.map((g) => (
-                    <div key={g.groupId} className="panel" style={{ background: 'var(--bg-secondary)' }}>
-                      <div className="btn-row">
-                        <strong>{g.workTitle}</strong>
-                        <span className={`badge ${g.crossDiskKeep ? 'ok' : 'warn'}`}>
-                          {g.crossDiskKeep
-                            ? isAr ? 'نسخ عبر أقراص مختلفة — محفوظة تلقائياً (Keep)' : 'Cross-Disk Copies — Preserved (Keep)'
-                            : isAr ? 'تكرار على نفس القرص — مراجعة' : 'Same-Disk Multi-Version'}
-                        </span>
-                      </div>
-                      {g.members.map((m) => (
-                        <div key={m.fileId} className="mono" style={{ fontSize: '0.78rem' }}>
-                          {m.isSelectedBest ? '★ BEST ' : '• '} [{m.diskLabel}] {m.filename} — {m.resolutionLabel} {m.videoCodec} (Score: {Math.round(m.qualityScore)}) → {m.proposedAction}
-                        </div>
-                      ))}
-                    </div>
-                  ))
-                )}
-              </section>
+                </div>
+                <div className="btn-row">
+                  <button className="primary" onClick={() => void handleGeneratePlan()} disabled={busy}>
+                    {isAr ? 'توليد خطة معاينة جديدة' : 'Generate Fresh Plan'}
+                  </button>
+                  <button onClick={() => void handleApproveAllSafe()} disabled={busy || !activeBatchId}>
+                    ✓ {isAr ? 'اعتماد كل العمليات الآمنة' : 'Approve All Safe Items'}
+                  </button>
+                  <button
+                    className="cta-execute-btn"
+                    style={{ padding: '8px 16px', fontSize: '0.88rem' }}
+                    onClick={() => setTab('organizer')}
+                  >
+                    {isAr ? 'الانتقال للوحة التنفيذ (تنفيذ التغييرات المعتمدة) ←' : 'Go to Execution Dashboard →'}
+                  </button>
+                </div>
+              </div>
 
-              <section className="panel">
-                <h2>{isAr ? 'سجل العمليات الموثق (Operation Journal)' : 'Verified Operation Journal'}</h2>
-                <table className="admin-table">
+              <div className="btn-row" style={{ justifyContent: 'space-between', background: 'var(--bg-secondary)', padding: '10px 14px', borderRadius: '10px', border: '1px solid var(--border-color)' }}>
+                <div className="btn-row">
+                  <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>{isAr ? 'الدفعة النشطة:' : 'Active Batch:'}</span>
+                  <select
+                    id="review-batch-select"
+                    className="input"
+                    value={activeBatchId}
+                    onChange={(e) => {
+                      setSelectedReviewIds({});
+                      void loadReviewAndOrganizer(e.target.value);
+                    }}
+                  >
+                    {batches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.title} [{b.batchStatus}] ({b.approvedItems}/{b.totalItems})
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    id="review-status-filter"
+                    className="input"
+                    value={reviewFilterStatus}
+                    onChange={(e) => setReviewFilterStatus(e.target.value)}
+                  >
+                    <option value="all">{isAr ? 'كل الحالات' : 'All Statuses'} ({batchItems.length})</option>
+                    <option value="pending">{isAr ? 'بانتظار القرار (Pending)' : 'Pending'}</option>
+                    <option value="approved">{isAr ? 'معتمد للتنفيذ (Approved)' : 'Approved'}</option>
+                    <option value="rejected">{isAr ? 'مرفوض / مستبعد (Rejected)' : 'Rejected'}</option>
+                    <option value="deferred">{isAr ? 'مؤجل للمراجعة اليدوية (Deferred)' : 'Deferred'}</option>
+                    <option value="executed">{isAr ? 'تم تنفيذه (Executed)' : 'Executed'}</option>
+                  </select>
+                </div>
+
+                <div className="btn-row">
+                  <span className="badge gold">
+                    {isAr ? `المحدد: ${selectedCount}` : `Selected: ${selectedCount}`}
+                  </span>
+                  <button id="btn-select-all-review" onClick={() => handleSelectAllReview(visibleItems)} disabled={visibleItems.length === 0}>
+                    {isAr ? 'تحديد الكل' : 'Select All'}
+                  </button>
+                  <button id="btn-deselect-all-review" onClick={() => handleDeselectAllReview()} disabled={selectedCount === 0}>
+                    {isAr ? 'إلغاء تحديد الكل' : 'Deselect All'}
+                  </button>
+                  <button
+                    id="btn-approve-selected-review"
+                    className="primary"
+                    disabled={busy || selectedCount === 0}
+                    onClick={() => void handleBulkReviewDecision('approved')}
+                  >
+                    ✓ {isAr ? 'اعتماد المحدد' : 'Approve Selected'}
+                  </button>
+                  <button
+                    id="btn-reject-selected-review"
+                    className="danger"
+                    disabled={busy || selectedCount === 0}
+                    onClick={() => void handleBulkReviewDecision('rejected')}
+                  >
+                    ✕ {isAr ? 'رفض المحدد' : 'Reject Selected'}
+                  </button>
+                </div>
+              </div>
+
+              {activeBatchObj && (
+                <div className="btn-row" style={{ fontSize: '0.8rem' }}>
+                  <span className="badge gold">{isAr ? `إجمالي العناصر: ${activeBatchObj.totalItems}` : `Total: ${activeBatchObj.totalItems}`}</span>
+                  <span className="badge ok">{isAr ? `معتمد: ${activeBatchObj.approvedItems}` : `Approved: ${activeBatchObj.approvedItems}`}</span>
+                  <span className="badge warn">{isAr ? `معلق: ${activeBatchObj.pendingItems}` : `Pending: ${activeBatchObj.pendingItems}`}</span>
+                  <span className="badge err">{isAr ? `مرفوض: ${activeBatchObj.rejectedItems ?? 0}` : `Rejected: ${activeBatchObj.rejectedItems ?? 0}`}</span>
+                  <span className="badge ok">{isAr ? `منفذ: ${activeBatchObj.executedItems}` : `Executed: ${activeBatchObj.executedItems}`}</span>
+                </div>
+              )}
+
+              <div className="table-scroll">
+                <table className="admin-table" id="review-items-table">
                   <thead>
                     <tr>
-                      <th>#</th>
-                      <th>{isAr ? 'الحالة' : 'State'}</th>
-                      <th>{isAr ? 'من ← إلى' : 'From -> To'}</th>
-                      <th>SHA-256</th>
+                      <th className="checkbox-cell">☑</th>
+                      <th>{isAr ? 'الاسم الأصلي والمجلد الأصلي' : 'Original Filename & Directory'}</th>
+                      <th>{isAr ? 'الاسم المقترح والوجهة المقترحة' : 'Proposed Filename & Destination'}</th>
+                      <th>{isAr ? 'نوع العنصر والعمل المرتبط' : 'File Type & Associated Work'}</th>
+                      <th>{isAr ? 'السبب ومستوى الثقة' : 'Reason & Confidence'}</th>
+                      <th>{isAr ? 'فحص السلامة والتعارضات' : 'Safety Validation & Conflict'}</th>
+                      <th>{isAr ? 'الإجراءات والقرار' : 'Actions & Decision'}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {journalEntries.slice(0, 20).map((j) => (
-                      <tr key={j.id}>
-                        <td>{j.stepSequence}</td>
-                        <td><span className="badge ok">{j.operationState}</span></td>
-                        <td className="mono">{j.sourcePath} → {j.destinationPath}</td>
-                        <td className="mono">{j.postSha256 ? `${j.postSha256.slice(0, 10)}…` : j.errorMessage}</td>
-                      </tr>
-                    ))}
+                    {visibleItems.map((it) => {
+                      const checked = Boolean(selectedReviewIds[it.id]);
+                      const kindBadge = it.protectedShortsFile
+                        ? '.shorts (Protected)'
+                        : it.mediaFileKind || it.itemFileKind || 'file';
+                      return (
+                        <tr key={it.id}>
+                          <td className="checkbox-cell">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={it.decisionStatus === 'executed'}
+                              onChange={(e) =>
+                                setSelectedReviewIds((prev) => ({ ...prev, [it.id]: e.target.checked }))
+                              }
+                            />
+                          </td>
+                          <td>
+                            <div className="mono" style={{ fontWeight: 700 }}>{it.oldName}</div>
+                            <div className="mono" style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                              {isAr ? 'المجلد الأصلي: ' : 'Orig Dir: '}[{it.diskLabel}] {it.oldDirPath || '/'}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="mono" style={{ fontWeight: 700, color: 'var(--accent-gold)' }}>
+                              {it.effectiveName || it.proposedName}
+                            </div>
+                            <div className="mono" style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                              {isAr ? 'الوجهة المقترحة: ' : 'Dest Dir: '}{it.effectiveDirPath || it.proposedDirPath || '/'}
+                            </div>
+                            {it.userEditedRelPath && (
+                              <span className="badge gold" style={{ marginTop: '4px' }}>
+                                {isAr ? 'مُعدّل يدوياً' : 'User Edited'}
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            <div className="btn-row">
+                              <span className={`badge ${it.protectedShortsFile ? 'gold' : 'ok'}`}>{kindBadge}</span>
+                              <span className="badge">{it.actionKind}</span>
+                            </div>
+                            <div style={{ fontSize: '0.79rem', marginTop: '4px' }}>
+                              {it.workTitle
+                                ? `${isAr ? 'مرتبط بـ: ' : 'Work: '}${it.workTitle}`
+                                : it.errorCategoryCode
+                                  ? `${isAr ? 'تصنيف الأخطاء: ' : 'Error Cat: '}${it.errorCategoryCode}`
+                                  : isAr ? 'غير مرتبط بعمل' : 'Unlinked'}
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '0.81rem', lineHeight: 1.4 }}>{it.reasonDescription}</div>
+                            <div style={{ marginTop: '4px' }}>
+                              <span className={`badge ${it.confidenceScore >= 0.85 ? 'ok' : 'warn'}`}>
+                                {isAr ? `الثقة: ${Math.round(it.confidenceScore * 100)}%` : `Confidence: ${Math.round(it.confidenceScore * 100)}%`}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            {it.conflictDetected ? (
+                              <span className="badge err">
+                                ⚠ {it.conflictDetails || (isAr ? 'تعارض يتطلب مراجعة' : 'Conflict Detected')}
+                              </span>
+                            ) : (
+                              <span className="badge ok">
+                                ✓ {isAr ? 'آمن — بلا تعارض' : 'Safe — No Collision'}
+                              </span>
+                            )}
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '5px' }}>
+                              {(it.safetyChecks ?? []).slice(0, 3).map((chk) => (
+                                <span key={chk} className="mono" style={{ fontSize: '0.69rem', color: 'var(--text-muted)' }}>
+                                  [{chk}]
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="btn-row">
+                              <span
+                                className={`badge ${
+                                  it.decisionStatus === 'approved' || it.decisionStatus === 'executed'
+                                    ? 'ok'
+                                    : it.decisionStatus === 'rejected'
+                                      ? 'err'
+                                      : 'warn'
+                                }`}
+                              >
+                                {it.decisionStatus}
+                              </span>
+                              {it.decisionStatus !== 'executed' && (
+                                <>
+                                  <button
+                                    className="primary"
+                                    title={isAr ? 'اعتماد' : 'Approve'}
+                                    disabled={it.conflictDetected}
+                                    onClick={() => void handleDecideItem(it, 'approved')}
+                                  >
+                                    ✓
+                                  </button>
+                                  <button
+                                    className="danger"
+                                    title={isAr ? 'رفض' : 'Reject'}
+                                    onClick={() => void handleDecideItem(it, 'rejected')}
+                                  >
+                                    ✕
+                                  </button>
+                                  <button
+                                    title={isAr ? 'تعديل الاسم المقترح أو الوجهة' : 'Edit Proposed Name / Destination'}
+                                    onClick={() => openEditTargetModal(it)}
+                                  >
+                                    ✎ {isAr ? 'تعديل الاسم/الوجهة' : 'Edit'}
+                                  </button>
+                                </>
+                              )}
+                              <button
+                                title={isAr ? 'عرض تفاصيل الملف الكاملة' : 'View File Details'}
+                                onClick={() => void handleOpenItemDetails(it.id)}
+                              >
+                                ℹ {isAr ? 'التفاصيل' : 'Details'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
+              </div>
+            </section>
+          );
+        })()}
+
+        {/* 6. ORGANIZATION EXECUTION DASHBOARD, MANIFEST SUMMARY & ROLLBACK UI */}
+        {tab === 'organizer' && (() => {
+          const activeBatchObj = batches.find((b) => b.id === activeBatchId) ?? batches[0] ?? null;
+          const canExecuteActive =
+            Boolean(activeBatchObj) &&
+            !busy &&
+            (manifestSummary?.totalApprovedOperations ?? activeBatchObj?.approvedItems ?? 0) > 0 &&
+            activeBatchObj?.batchStatus !== 'completed';
+          const hasInterrupted = (execProgress?.interruptedEntries ?? 0) > 0 || activeBatchObj?.batchStatus === 'halted_on_interrupt';
+
+          return (
+            <>
+              <section className="panel" id="execution-dashboard-panel">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
+                  <div>
+                    <h2>
+                      {isAr
+                        ? 'لوحة التنفيذ الآمن الموثق ببيان العمليات (Immutable SHA-256 Manifest) والتراجع الكامل'
+                        : 'Safe Organization Execution Dashboard & 1-Click Verified Rollback'}
+                    </h2>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                      {isAr
+                        ? 'يُنفذ النظام فقط العمليات المعتمدة صراحةً داخل بيان غير قابل للتغيير بعد أخذ نسخة احتياطية مسبقة والتحقق من SHA-256 ومنع أي استبدال.'
+                        : 'Executes strictly user-approved operations locked in an immutable SHA-256 manifest after a verified pre-batch backup with zero overwrites.'}
+                    </p>
+                  </div>
+
+                  <div className="btn-row">
+                    <button
+                      id="btn-execute-approved-changes"
+                      className="cta-execute-btn"
+                      disabled={!canExecuteActive}
+                      onClick={() => activeBatchObj && void handleExecuteBatch(activeBatchObj.id)}
+                    >
+                      {isAr ? 'تنفيذ التغييرات المعتمدة' : 'Execute Approved Changes (تنفيذ التغييرات المعتمدة)'}
+                    </button>
+
+                    {activeBatchObj && activeBatchObj.executedItems > 0 && activeBatchObj.batchStatus !== 'rolled_back' && (
+                      <button
+                        id="btn-rollback-active-batch"
+                        className="danger"
+                        disabled={busy}
+                        onClick={() => void handleRollbackBatch(activeBatchObj.id)}
+                      >
+                        ↺ {isAr ? 'تراجع كامل موثق (Rollback)' : 'Verified Batch Rollback'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="btn-row" style={{ justifyContent: 'space-between', background: 'var(--bg-secondary)', padding: '10px 14px', borderRadius: '10px', border: '1px solid var(--border-color)' }}>
+                  <div className="btn-row">
+                    <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+                      {isAr ? 'دفعة التنفيذ المحددة:' : 'Target Execution Batch:'}
+                    </span>
+                    <select
+                      className="input"
+                      value={activeBatchId}
+                      onChange={(e) => void loadReviewAndOrganizer(e.target.value)}
+                    >
+                      {batches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.title} [{b.batchStatus}] ({b.approvedItems}/{b.totalItems})
+                        </option>
+                      ))}
+                    </select>
+                    {manifestSummary?.manifestSha256 && (
+                      <span className="badge gold mono">
+                        Manifest SHA-256: {manifestSummary.manifestSha256.slice(0, 14)}…
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="btn-row">
+                    <button
+                      id="btn-pause-execution"
+                      disabled={!execProgress?.running || execProgress?.paused}
+                      onClick={() => void handlePauseExecution()}
+                    >
+                      ⏸ {isAr ? 'إيقاف مؤقت آمن' : 'Pause'}
+                    </button>
+                    <button
+                      id="btn-resume-execution"
+                      disabled={!execProgress?.paused}
+                      onClick={() => void handleResumeExecution()}
+                    >
+                      ▶ {isAr ? 'استئناف' : 'Resume'}
+                    </button>
+                    <button
+                      id="btn-cancel-execution"
+                      className="danger"
+                      disabled={!execProgress?.running}
+                      onClick={() => void handleCancelExecution()}
+                    >
+                      ⏹ {isAr ? 'إلغاء آمن للعمليات المتبقية' : 'Safe Cancel'}
+                    </button>
+                    {activeBatchObj && hasInterrupted && (
+                      <button
+                        id="btn-recover-interrupted"
+                        className="primary"
+                        disabled={busy}
+                        onClick={() => void handleRecoverBatch(activeBatchObj.id)}
+                      >
+                        ⚡ {isAr ? 'استعادة التنفيذ المتوقف بأمان' : 'Recover Interrupted Execution'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 9-Metric Pre-Execution Summary Generated Directly From Approved Operation Manifest */}
+                {manifestSummary && (
+                  <div className="manifest-grid" id="manifest-pre-execution-summary">
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'ملفات ستُعاد تسميتها' : 'Files to Rename'}</span>
+                      <span className="m-val">{manifestSummary.filesToRename}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'ملفات ستُنقل لمجلداتها' : 'Files to Move'}</span>
+                      <span className="m-val">{manifestSummary.filesToMove}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'مجلدات رسمية ستُنشأ' : 'Folders to Create'}</span>
+                      <span className="m-val">{manifestSummary.foldersToCreate}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'مجلدات فارغة إلى الأخطاء' : 'Empty Folders -> Errors'}</span>
+                      <span className="m-val">{manifestSummary.emptyFoldersToMoveErrors}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'ملفات ترجمة ستُربط وتُنظم' : 'Subtitles to Associate'}</span>
+                      <span className="m-val">{manifestSummary.subtitlesToAssociate}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'بوسترات وصور فنية ستُعتمد' : 'Posters & Artwork'}</span>
+                      <span className="m-val">{manifestSummary.postersArtworkToAssociate}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'مرفقات .shorts محمية دائماً' : '.shorts Companions Preserved'}</span>
+                      <span className="m-val">{manifestSummary.shortsToPreserve}</span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'تعارضات غير محلولة (تُمنع)' : 'Unresolved Conflicts'}</span>
+                      <span className="m-val" style={{ color: manifestSummary.unresolvedConflicts > 0 ? 'var(--status-warn)' : 'var(--status-ok)' }}>
+                        {manifestSummary.unresolvedConflicts}
+                      </span>
+                    </div>
+                    <div className="manifest-metric">
+                      <span className="m-label">{isAr ? 'ملفات ستبقى بدون أي تغيير' : 'Files Remaining Unchanged'}</span>
+                      <span className="m-val">{manifestSummary.unchangedFilesCount}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Per-Operation Status Table */}
+                <h3 style={{ fontSize: '0.92rem', color: 'var(--accent-gold)', marginTop: '4px' }}>
+                  {isAr ? 'حالة كل عملية داخل الدفعة (Per-Operation Execution Status)' : 'Per-Operation Execution Status'}
+                </h3>
+                <div className="table-scroll">
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>{isAr ? 'العنصر الأصلي' : 'Source Item'}</th>
+                        <th>{isAr ? 'الوجهة المعتمدة' : 'Target Path'}</th>
+                        <th>{isAr ? 'العملية' : 'Action'}</th>
+                        <th>{isAr ? 'حالة القرار / التنفيذ' : 'Operation Status'}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {batchItems.slice(0, 30).map((it, idx) => (
+                        <tr key={it.id}>
+                          <td>{idx + 1}</td>
+                          <td className="mono">{it.oldRelPath}</td>
+                          <td className="mono">{it.effectiveRelPath}</td>
+                          <td><span className="badge">{it.actionKind}</span></td>
+                          <td>
+                            <span
+                              className={`badge ${
+                                it.decisionStatus === 'executed' || it.decisionStatus === 'approved'
+                                  ? 'ok'
+                                  : it.decisionStatus === 'rejected' || it.decisionStatus === 'failed'
+                                    ? 'err'
+                                    : 'warn'
+                              }`}
+                            >
+                              {it.operationState ? `${it.decisionStatus} (${it.operationState})` : it.decisionStatus}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </section>
-            </div>
-          </>
-        )}
+
+              <div className="split-layout">
+                <section className="panel">
+                  <h2>{isAr ? 'تحليل التكرارات واختيار أفضل نسخة (Cross-Disk = Keep)' : 'Duplicates & Best-Version Selection (Cross-Disk = Keep)'}</h2>
+                  <div className="btn-row">
+                    <input
+                      className="input"
+                      value={namingSampleTitle}
+                      onChange={(e) => setNamingSampleTitle(e.target.value)}
+                      placeholder="Movie / Series Title"
+                    />
+                    <input
+                      type="number"
+                      className="input"
+                      style={{ width: '95px' }}
+                      value={namingSampleYear}
+                      onChange={(e) => setNamingSampleYear(Number(e.target.value))}
+                    />
+                    <button
+                      onClick={() =>
+                        void LibraryClient.previewNamingRules(namingSampleTitle, namingSampleYear, false, 1, 1).then((r) =>
+                          setNamingPreviewOut(JSON.stringify(r, null, 2))
+                        )
+                      }
+                    >
+                      {isAr ? 'معاينة فيلم + .shorts' : 'Preview Movie + .shorts'}
+                    </button>
+                    <button
+                      onClick={() =>
+                        void LibraryClient.previewNamingRules(namingSampleTitle, namingSampleYear, true, 1, 1).then((r) =>
+                          setNamingPreviewOut(JSON.stringify(r, null, 2))
+                        )
+                      }
+                    >
+                      {isAr ? 'معاينة مسلسل S01/01' : 'Preview Series S01/01'}
+                    </button>
+                  </div>
+                  {namingPreviewOut && (
+                    <pre className="mono" style={{ background: 'var(--bg-primary)', padding: '10px', borderRadius: '8px' }}>
+                      {namingPreviewOut}
+                    </pre>
+                  )}
+
+                  {dupGroups.length === 0 ? (
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.86rem' }}>
+                      {isAr ? 'لا توجد مجموعات تكرار مرصودة حالياً.' : 'No duplicate groups detected.'}
+                    </p>
+                  ) : (
+                    dupGroups.map((g) => (
+                      <div key={g.groupId} className="panel" style={{ background: 'var(--bg-secondary)' }}>
+                        <div className="btn-row">
+                          <strong>{g.workTitle}</strong>
+                          <span className={`badge ${g.crossDiskKeep ? 'ok' : 'warn'}`}>
+                            {g.crossDiskKeep
+                              ? isAr ? 'نسخ عبر أقراص مختلفة — محفوظة تلقائياً (Keep)' : 'Cross-Disk Copies — Preserved (Keep)'
+                              : isAr ? 'تكرار على نفس القرص — مراجعة بدون حذف تلقائي' : 'Same-Disk Multi-Version'}
+                          </span>
+                        </div>
+                        {g.members.map((m) => (
+                          <div key={m.fileId} className="mono" style={{ fontSize: '0.78rem' }}>
+                            {m.isSelectedBest ? '★ BEST ' : '• '} [{m.diskLabel}] {m.filename} — {m.resolutionLabel} {m.videoCodec} (Score: {Math.round(m.qualityScore)}) → {m.proposedAction}
+                          </div>
+                        ))}
+                      </div>
+                    ))
+                  )}
+                </section>
+
+                <section className="panel">
+                  <h2>{isAr ? 'سجل العمليات الموثق بـ SHA-256 (Operation Journal)' : 'Verified SHA-256 Operation Journal'}</h2>
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>{isAr ? 'الحالة' : 'State'}</th>
+                        <th>{isAr ? 'من ← إلى' : 'From -> To'}</th>
+                        <th>SHA-256</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {journalEntries.slice(0, 25).map((j) => (
+                        <tr key={j.id}>
+                          <td>{j.stepSequence}</td>
+                          <td><span className={`badge ${j.operationState === 'completed' ? 'ok' : 'warn'}`}>{j.operationState}</span></td>
+                          <td className="mono">{j.sourcePath} → {j.destinationPath}</td>
+                          <td className="mono">{j.postSha256 ? `${j.postSha256.slice(0, 12)}…` : j.errorMessage}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* 6B. MANAGED ERROR CENTER (الأخطاء — 6 OFFICIAL CATEGORIES & REVERSIBLE RESTORE) */}
+        {tab === 'errors' && (() => {
+          const selectedErrCount = Object.values(selectedErrorIds).filter(Boolean).length;
+          const activeEntries = errorEntries.filter((e) => e.entryStatus === 'active');
+          const distinctBatches = Array.from(
+            new Set(activeEntries.map((e) => e.batchId).filter(Boolean))
+          );
+
+          return (
+            <section className="panel" id="error-center-panel">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <h2>
+                    {isAr
+                      ? 'مركز الأخطاء المُدار (الأخطاء/) — الفئات الست الرسمية والاسترجاع الكامل بدون أي حذف تلقائي'
+                      : 'Managed Error Center (الأخطاء/) — 6 Official Categories & Full Reversible Restore'}
+                  </h2>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                    {isAr
+                      ? 'جميع الملفات المنقولة إلى الأخطاء محفوظة ببصمة SHA-256 ومسارها الأصلي الكامل، مع حماية دائمة لملفات .shorts من النقل إلى العينات أو الأخطاء.'
+                      : 'All quarantined items preserve SHA-256 hashes and original paths with 1-click individual, multi-select, or batch restoration. .shorts files are permanently protected.'}
+                  </p>
+                </div>
+
+                <div className="btn-row">
+                  <button
+                    onClick={() => {
+                      const next: Record<string, boolean> = {};
+                      for (const ev of activeEntries) next[ev.id] = true;
+                      setSelectedErrorIds(next);
+                    }}
+                    disabled={activeEntries.length === 0}
+                  >
+                    {isAr ? 'تحديد كل النشط' : 'Select All Active'}
+                  </button>
+                  <button onClick={() => setSelectedErrorIds({})} disabled={selectedErrCount === 0}>
+                    {isAr ? 'إلغاء التحديد' : 'Deselect All'}
+                  </button>
+                  <button
+                    id="btn-restore-selected-errors"
+                    className="primary"
+                    disabled={busy || selectedErrCount === 0}
+                    onClick={() => void handleRestoreSelectedErrorEntries()}
+                  >
+                    ↺ {isAr ? `استرجاع المحدد (${selectedErrCount})` : `Restore Selected (${selectedErrCount})`}
+                  </button>
+                  {distinctBatches.length > 0 && (
+                    <button
+                      id="btn-restore-complete-error-batch"
+                      disabled={busy}
+                      onClick={() => void handleRestoreErrorBatch(distinctBatches[0])}
+                    >
+                      ↺ {isAr ? 'استرجاع دفعة الأخطاء كاملة' : 'Restore Complete Reversible Batch'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="category-tabs" id="error-category-tabs">
+                <button
+                  className={`cat-tab-btn ${activeErrorCategory === 'all' ? 'active' : ''}`}
+                  onClick={() => {
+                    setActiveErrorCategory('all');
+                    void loadErrorCenter('all');
+                  }}
+                >
+                  <span>{isAr ? 'كل الفئات (6)' : 'All 6 Categories'}</span>
+                  <span className="nav-pill">{activeEntries.length}</span>
+                </button>
+                {errorCategories.map((cat) => (
+                  <button
+                    key={cat.code}
+                    id={`err-cat-${cat.code}`}
+                    className={`cat-tab-btn ${activeErrorCategory === cat.code ? 'active' : ''}`}
+                    onClick={() => {
+                      setActiveErrorCategory(cat.code);
+                      void loadErrorCenter(cat.code);
+                    }}
+                  >
+                    <span>{isAr ? cat.folderAr : `${cat.titleEn} (${cat.folderAr})`}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="table-scroll">
+                <table className="admin-table" id="error-entries-table">
+                  <thead>
+                    <tr>
+                      <th className="checkbox-cell">☑</th>
+                      <th>{isAr ? 'العنصر والتصنيف الرسمي' : 'Item & Official Category'}</th>
+                      <th>{isAr ? 'الموقع الأصلي الكامل (قبل النقل)' : 'Original Location (Before)'}</th>
+                      <th>{isAr ? 'موقع الحفظ في الأخطاء' : 'Managed Error Path'}</th>
+                      <th>{isAr ? 'سبب التصنيف والتحقق' : 'Classification Reason & SHA-256'}</th>
+                      <th>{isAr ? 'الحالة والاسترجاع' : 'Status & Restore'}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {errorEntries.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '18px' }}>
+                          {isAr
+                            ? 'لا توجد عناصر حالياً في هذا التصنيف داخل مجلد الأخطاء.'
+                            : 'No items currently in this Error Center category.'}
+                        </td>
+                      </tr>
+                    ) : (
+                      errorEntries.map((ev) => (
+                        <tr key={ev.id}>
+                          <td className="checkbox-cell">
+                            <input
+                              type="checkbox"
+                              disabled={ev.entryStatus !== 'active'}
+                              checked={Boolean(selectedErrorIds[ev.id])}
+                              onChange={(e) =>
+                                setSelectedErrorIds((prev) => ({ ...prev, [ev.id]: e.target.checked }))
+                              }
+                            />
+                          </td>
+                          <td>
+                            <strong>{ev.itemName}</strong>
+                            <div className="btn-row" style={{ marginTop: '4px' }}>
+                              <span className="badge gold">{ev.categoryFolderAr}</span>
+                              <span className="badge">{ev.entryKind}</span>
+                              {ev.entryKind === 'file' && <span className="mono">{formatBytes(ev.sizeBytes)}</span>}
+                            </div>
+                          </td>
+                          <td className="mono">
+                            [{ev.diskLabel || ev.diskId.slice(0, 6)}] {ev.originalRelPath}
+                          </td>
+                          <td className="mono">{ev.errorRelPath}</td>
+                          <td>
+                            <div style={{ fontSize: '0.8rem' }}>{isAr ? ev.reasonAr : ev.reasonEn || ev.reasonAr}</div>
+                            {ev.sha256Hash && (
+                              <div className="mono" style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                                SHA-256: {ev.sha256Hash.slice(0, 16)}…
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            <div className="btn-row">
+                              <span className={`badge ${ev.entryStatus === 'restored' ? 'ok' : 'warn'}`}>
+                                {ev.entryStatus === 'restored'
+                                  ? isAr ? 'تم الاسترجاع' : 'Restored'
+                                  : isAr ? 'محفوظ في الأخطاء' : 'Quarantined'}
+                              </span>
+                              <button onClick={() => setInspectedErrorEntry(ev)}>
+                                ℹ {isAr ? 'فحص' : 'Inspect'}
+                              </button>
+                              {ev.entryStatus === 'active' && (
+                                <button
+                                  className="primary"
+                                  disabled={busy}
+                                  onClick={() => void handleRestoreSingleErrorEntry(ev.id)}
+                                >
+                                  ↺ {isAr ? 'استرجاع للموقع الأصلي' : 'Restore Item'}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          );
+        })()}
 
         {/* 7. INTEGRATED MEDIA PLAYER */}
         {tab === 'player' && (
@@ -1616,7 +2345,7 @@ export function App(): React.JSX.Element {
               <div className="btn-row">
                 <button
                   onClick={() =>
-                    void PoCService.TestCredentialManager().then((r) =>
+                    void callPoC(PoCService.TestCredentialManager, 'TestCredentialManager').then((r) =>
                       notify('ok', `Credential Manager (${r.backend}): write=${r.writeSucceeded}, purged=${r.confirmedPurged}`)
                     )
                   }
@@ -1683,6 +2412,171 @@ export function App(): React.JSX.Element {
                 ))}
               </div>
             </section>
+          </div>
+        )}
+
+        {/* MODAL 1: EDIT PROPOSED FILENAME & DESTINATION */}
+        {editTargetModalItem && (
+          <div className="modal-backdrop" onClick={() => setEditTargetModalItem(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <h2>{isAr ? 'تعديل الاسم المقترح أو مجلد الوجهة' : 'Edit Proposed Filename & Destination Directory'}</h2>
+              <div className="mono" style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                {isAr ? 'العنصر الأصلي: ' : 'Original Item: '}
+                {editTargetModalItem.oldRelPath}
+              </div>
+              {editTargetModalItem.protectedShortsFile && (
+                <div className="badge gold">
+                  {isAr
+                    ? 'قانون الحماية نشط: يجب الاحتفاظ بامتداد .shorts كما هو دون حذف أو تغيير.'
+                    : 'Protection Law Active: .shorts extension must remain intact.'}
+                </div>
+              )}
+
+              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                {isAr ? 'الاسم المقترح الجديد (Proposed Filename):' : 'Proposed Filename:'}
+              </label>
+              <input
+                id="modal-edit-filename-input"
+                className="input mono"
+                value={modalEditName}
+                onChange={(e) => setModalEditName(e.target.value)}
+              />
+
+              <label style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                {isAr ? 'مجلد الوجهة النسبي على القرص (Proposed Destination Directory):' : 'Proposed Destination Directory (Relative to Disk):'}
+              </label>
+              <input
+                id="modal-edit-dir-input"
+                className="input mono"
+                placeholder="Movies/Movie Title (2024)"
+                value={modalEditDir}
+                onChange={(e) => setModalEditDir(e.target.value)}
+              />
+
+              <div className="btn-row" style={{ justifyContent: 'flex-end', marginTop: '8px' }}>
+                <button onClick={() => setEditTargetModalItem(null)}>{isAr ? 'إلغاء' : 'Cancel'}</button>
+                <button className="primary" disabled={busy} onClick={() => void handleSaveEditedTarget()}>
+                  ✓ {isAr ? 'حفظ وفحص عدم التعارض' : 'Save & Check Collisions'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL 2: VIEW FULL REVIEW FILE DETAILS */}
+        {detailModalData && (
+          <div className="modal-backdrop" onClick={() => setDetailModalData(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <h2>{isAr ? 'تفاصيل العنصر وفحوص السلامة الكاملة' : 'Full File & Safety Inspection Details'}</h2>
+              <div className="kv-grid">
+                <div className="kv-k">{isAr ? 'الاسم الأصلي:' : 'Original Filename:'}</div>
+                <div className="mono">{detailModalData.item.oldName}</div>
+
+                <div className="kv-k">{isAr ? 'المسار الأصلي الكامل:' : 'Original Full Path:'}</div>
+                <div className="mono">{detailModalData.item.oldFullPath}</div>
+
+                <div className="kv-k">{isAr ? 'الاسم المقترح المعتمد:' : 'Effective Filename:'}</div>
+                <div className="mono">{detailModalData.item.effectiveName || detailModalData.item.proposedName}</div>
+
+                <div className="kv-k">{isAr ? 'الوجهة الكاملة المقترحة:' : 'Proposed Full Destination:'}</div>
+                <div className="mono">{detailModalData.item.effectiveFullPath}</div>
+
+                <div className="kv-k">{isAr ? 'نوع الملف / العنصر:' : 'File Type:'}</div>
+                <div>
+                  {detailModalData.item.mediaFileKind || detailModalData.item.itemFileKind} ({detailModalData.extension || 'dir'})
+                  {detailModalData.item.protectedShortsFile ? ' [.shorts Protected]' : ''}
+                </div>
+
+                <div className="kv-k">{isAr ? 'العمل المرتبط:' : 'Associated Movie/Series:'}</div>
+                <div>
+                  {detailModalData.item.workTitle
+                    ? `${detailModalData.item.workTitle} (${detailModalData.productionYear || 'Series'}) [${detailModalData.workStatus}]`
+                    : isAr ? 'غير مرتبط' : 'None'}
+                </div>
+
+                <div className="kv-k">{isAr ? 'الحجم والدقة:' : 'Size & Resolution:'}</div>
+                <div className="mono">
+                  {formatBytes(detailModalData.item.fileSizeBytes ?? 0)}
+                  {detailModalData.videoWidth > 0 ? ` | ${detailModalData.videoWidth}x${detailModalData.videoHeight} (${detailModalData.item.videoCodec})` : ''}
+                  {detailModalData.durationSeconds > 0 ? ` | ${Math.round(detailModalData.durationSeconds)}s` : ''}
+                </div>
+
+                <div className="kv-k">{isAr ? 'حالة الفحص الفني وبصمة SHA-256:' : 'Probe & SHA-256:'}</div>
+                <div className="mono">
+                  {detailModalData.probeStatus || 'n/a'} | {detailModalData.fileSha256 || (isAr ? 'تُحسب وتُوثق عند التنفيذ' : 'Verified on execute')}
+                </div>
+
+                <div className="kv-k">{isAr ? 'سبب التصنيف / التسمية:' : 'Classification Reason:'}</div>
+                <div>{detailModalData.item.reasonDescription}</div>
+
+                <div className="kv-k">{isAr ? 'مستوى الثقة وحالة التعارض:' : 'Confidence & Conflict:'}</div>
+                <div>
+                  {Math.round(detailModalData.item.confidenceScore * 100)}% —{' '}
+                  {detailModalData.item.conflictDetected
+                    ? detailModalData.item.conflictDetails
+                    : isAr ? 'لا يوجد تعارض' : 'No Conflict'}
+                </div>
+
+                <div className="kv-k">{isAr ? 'المرفقات المرتبطة بالحزمة:' : 'Bundle Companions:'}</div>
+                <div className="mono">
+                  {detailModalData.item.linkedCompanions.length > 0
+                    ? detailModalData.item.linkedCompanions.join(' , ')
+                    : '—'}
+                </div>
+              </div>
+              <div className="btn-row" style={{ justifyContent: 'flex-end', marginTop: '8px' }}>
+                <button className="primary" onClick={() => setDetailModalData(null)}>
+                  {isAr ? 'إغلاق' : 'Close'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL 3: INSPECT ERROR CENTER ITEM */}
+        {inspectedErrorEntry && (
+          <div className="modal-backdrop" onClick={() => setInspectedErrorEntry(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <h2>{isAr ? 'فحص عنصر مركز الأخطاء وأصل مساره' : 'Inspect Error Center Item & Provenance'}</h2>
+              <div className="kv-grid">
+                <div className="kv-k">{isAr ? 'اسم العنصر:' : 'Item Name:'}</div>
+                <div className="mono">{inspectedErrorEntry.itemName}</div>
+
+                <div className="kv-k">{isAr ? 'التصنيف الرسمي:' : 'Official Category:'}</div>
+                <div>{inspectedErrorEntry.categoryFolderAr} ({inspectedErrorEntry.categoryCode})</div>
+
+                <div className="kv-k">{isAr ? 'الموقع الأصلي الكامل:' : 'Original Full Location:'}</div>
+                <div className="mono">{inspectedErrorEntry.originalFullPath || inspectedErrorEntry.originalRelPath}</div>
+
+                <div className="kv-k">{isAr ? 'الموقع الحالي في الأخطاء:' : 'Current Managed Error Path:'}</div>
+                <div className="mono">{inspectedErrorEntry.errorFullPath || inspectedErrorEntry.errorRelPath}</div>
+
+                <div className="kv-k">{isAr ? 'سبب التصنيف التفصيلي:' : 'Classification Reason:'}</div>
+                <div>{isAr ? inspectedErrorEntry.reasonAr : inspectedErrorEntry.reasonEn || inspectedErrorEntry.reasonAr}</div>
+
+                <div className="kv-k">{isAr ? 'بصمة SHA-256 الموثقة:' : 'Verified SHA-256:'}</div>
+                <div className="mono">{inspectedErrorEntry.sha256Hash || (isAr ? 'مجلد فارغ' : 'Directory')}</div>
+
+                <div className="kv-k">{isAr ? 'تاريخ النقل / الدفعة:' : 'Moved At / Batch:'}</div>
+                <div className="mono">{inspectedErrorEntry.movedAt} {inspectedErrorEntry.batchTitle ? `(${inspectedErrorEntry.batchTitle})` : ''}</div>
+              </div>
+              <div className="btn-row" style={{ justifyContent: 'flex-end', marginTop: '8px' }}>
+                {inspectedErrorEntry.entryStatus === 'active' && (
+                  <button
+                    className="primary"
+                    disabled={busy}
+                    onClick={() => {
+                      const id = inspectedErrorEntry.id;
+                      setInspectedErrorEntry(null);
+                      void handleRestoreSingleErrorEntry(id);
+                    }}
+                  >
+                    ↺ {isAr ? 'استرجاع فوري إلى موقعه الأصلي' : 'Restore to Original Location'}
+                  </button>
+                )}
+                <button onClick={() => setInspectedErrorEntry(null)}>{isAr ? 'إغلاق' : 'Close'}</button>
+              </div>
+            </div>
           </div>
         )}
       </main>
