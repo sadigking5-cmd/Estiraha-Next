@@ -44,12 +44,13 @@ func generateTestVideoWithFFmpeg(t *testing.T, outPath string, durationSec int, 
 	}
 	args := []string{
 		"-y", "-hide_banner", "-loglevel", "error",
-		"-f", "lavfi", "-i", "testsrc=size=" + itoa(width) + "x" + itoa(height) + ":rate=15",
+		"-threads", "1",
+		"-f", "lavfi", "-i", "color=c=navy:size=" + itoa(width) + "x" + itoa(height) + ":rate=10",
 		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=22050",
 		"-t", itoa(durationSec),
 	}
 	args = append(args, extraArgs...)
-	args = append(args, outPath)
+	args = append(args, "-threads", "1", outPath)
 	cmd := exec.Command(ffmpegBin, args...)
 	out, runErr := cmd.CombinedOutput()
 	if runErr != nil {

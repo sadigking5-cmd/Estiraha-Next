@@ -2,7 +2,9 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ type ReviewBatchView struct {
 	TotalItems    int    `json:"totalItems"`
 	ApprovedItems int    `json:"approvedItems"`
 	PendingItems  int    `json:"pendingItems"`
+	RejectedItems int    `json:"rejectedItems"`
 	ExecutedItems int    `json:"executedItems"`
 	ApprovedByAt  string `json:"approvedByUserAt"`
 	CreatedAt     string `json:"createdAt"`
@@ -38,19 +41,26 @@ type ReviewItemView struct {
 	BatchID             string   `json:"batchId"`
 	FileID              string   `json:"fileId"`
 	WorkID              string   `json:"workId"`
+	WorkTitle           string   `json:"workTitle"`
+	WorkMediaType       string   `json:"workMediaType"`
 	ItemFileKind        string   `json:"itemFileKind"`
+	MediaFileKind       string   `json:"mediaFileKind"`
 	ActionKind          string   `json:"actionKind"`
 	ErrorCategoryCode   string   `json:"errorCategoryCode"`
 	SourceDiskID        string   `json:"sourceDiskId"`
 	DiskLabel           string   `json:"diskLabel"`
 	OldRelPath          string   `json:"oldRelPath"`
+	OldDirPath          string   `json:"oldDirPath"`
 	OldFullPath         string   `json:"oldFullPath"`
 	OldName             string   `json:"oldName"`
 	TargetDiskID        string   `json:"targetDiskId"`
 	ProposedRelPath     string   `json:"proposedRelPath"`
+	ProposedDirPath     string   `json:"proposedDirPath"`
 	EffectiveRelPath    string   `json:"effectiveRelPath"`
+	EffectiveDirPath    string   `json:"effectiveDirPath"`
 	EffectiveFullPath   string   `json:"effectiveFullPath"`
 	ProposedName        string   `json:"proposedName"`
+	EffectiveName       string   `json:"effectiveName"`
 	UserEditedRelPath   string   `json:"userEditedRelPath"`
 	UserEditedName      string   `json:"userEditedName"`
 	ReasonDescription   string   `json:"reasonDescription"`
@@ -61,6 +71,25 @@ type ReviewItemView struct {
 	ProtectedShortsFile bool     `json:"protectedShortsFile"`
 	LinkedCompanions    []string `json:"linkedCompanions"`
 	SafetyChecks        []string `json:"safetyChecks"`
+	FileSizeBytes       int64    `json:"fileSizeBytes"`
+	ResolutionLabel     string   `json:"resolutionLabel"`
+	VideoCodec          string   `json:"videoCodec"`
+	OperationState      string   `json:"operationState"`
+}
+
+type ReviewItemDetailView struct {
+	Item            ReviewItemView `json:"item"`
+	Extension       string         `json:"extension"`
+	FileSHA256      string         `json:"fileSha256"`
+	DurationSeconds float64        `json:"durationSeconds"`
+	VideoWidth      int            `json:"videoWidth"`
+	VideoHeight     int            `json:"videoHeight"`
+	ProbeStatus     string         `json:"probeStatus"`
+	IntegrityStatus string         `json:"integrityStatus"`
+	PresenceStatus  string         `json:"presenceStatus"`
+	ProductionYear  int            `json:"productionYear"`
+	WorkStatus      string         `json:"workStatus"`
+	LastJournalMsg  string         `json:"lastJournalMsg"`
 }
 
 type ItemDecisionInput struct {
@@ -68,6 +97,61 @@ type ItemDecisionInput struct {
 	Decision          string `json:"decision"`
 	UserEditedRelPath string `json:"userEditedRelPath"`
 	UserEditedName    string `json:"userEditedName"`
+	UserEditedDirPath string `json:"userEditedDirPath"`
+}
+
+type BulkDecisionInput struct {
+	BatchID  string   `json:"batchId"`
+	ItemIDs  []string `json:"itemIds"`
+	Decision string   `json:"decision"`
+}
+
+type BulkDecisionResult struct {
+	BatchID      string   `json:"batchId"`
+	UpdatedCount int      `json:"updatedCount"`
+	SkippedCount int      `json:"skippedCount"`
+	Warnings     []string `json:"warnings"`
+}
+
+type ManifestStepSpec struct {
+	Sequence            int    `json:"sequence"`
+	ReviewItemID        string `json:"reviewItemId"`
+	FileID              string `json:"fileId"`
+	ItemFileKind        string `json:"itemFileKind"`
+	MediaFileKind       string `json:"mediaFileKind"`
+	ActionKind          string `json:"actionKind"`
+	ErrorCategoryCode   string `json:"errorCategoryCode"`
+	DiskID              string `json:"diskId"`
+	DiskLabel           string `json:"diskLabel"`
+	MountPath           string `json:"mountPath"`
+	RootID              string `json:"rootId"`
+	RootRelPath         string `json:"rootRelPath"`
+	OldRelPath          string `json:"oldRelPath"`
+	OldName             string `json:"oldName"`
+	EffectiveRelPath    string `json:"effectiveRelPath"`
+	EffectiveName       string `json:"effectiveName"`
+	ProtectedShortsFile bool   `json:"protectedShortsFile"`
+	ReasonDescription   string `json:"reasonDescription"`
+	ApprovedAt          string `json:"approvedAt"`
+}
+
+type ExecutionManifestSummary struct {
+	BatchID                   string             `json:"batchId"`
+	BatchTitle                string             `json:"batchTitle"`
+	BatchStatus               string             `json:"batchStatus"`
+	ManifestSHA256            string             `json:"manifestSha256"`
+	TotalApprovedOperations   int                `json:"totalApprovedOperations"`
+	FilesToRename             int                `json:"filesToRename"`
+	FilesToMove               int                `json:"filesToMove"`
+	FoldersToCreate           int                `json:"foldersToCreate"`
+	EmptyFoldersToMoveErrors  int                `json:"emptyFoldersToMoveErrors"`
+	SubtitlesToAssociate      int                `json:"subtitlesToAssociate"`
+	PostersArtworkToAssociate int                `json:"postersArtworkToAssociate"`
+	ShortsToPreserve          int                `json:"shortsToPreserve"`
+	UnresolvedConflicts       int                `json:"unresolvedConflicts"`
+	UnchangedFilesCount       int                `json:"unchangedFilesCount"`
+	TargetFolders             []string           `json:"targetFolders"`
+	Steps                     []ManifestStepSpec `json:"steps"`
 }
 
 type Service struct {
@@ -738,15 +822,17 @@ func (s *Service) DecideItem(ctx context.Context, in ItemDecisionInput) (ReviewI
 		return ReviewItemView{}, fmt.Errorf("review: unsupported decision %q", in.Decision)
 	}
 
-	var oldName, proposedRel, proposedName, diskID, mountPath, fileID, actionKind, errorCat string
+	var oldName, oldRel, proposedRel, proposedName, curEditedRel, curEditedName, diskID, mountPath, fileID, actionKind, errorCat string
 	var conflictInt int
 	err := s.sqlDB.QueryRowContext(ctx, `
-		SELECT ri.old_name, ri.proposed_rel_path, ri.proposed_name, ri.target_disk_id, d.mount_path,
+		SELECT ri.old_name, ri.old_rel_path, ri.proposed_rel_path, ri.proposed_name,
+		       COALESCE(ri.user_edited_rel_path, ''), COALESCE(ri.user_edited_name, ''),
+		       ri.target_disk_id, d.mount_path,
 		       COALESCE(ri.file_id, ''), ri.action_kind, ri.error_category_code, ri.conflict_detected
 		FROM review_items ri
 		JOIN disks d ON d.id = ri.target_disk_id
 		WHERE ri.id = ?
-	`, in.ItemID).Scan(&oldName, &proposedRel, &proposedName, &diskID, &mountPath, &fileID, &actionKind, &errorCat, &conflictInt)
+	`, in.ItemID).Scan(&oldName, &oldRel, &proposedRel, &proposedName, &curEditedRel, &curEditedName, &diskID, &mountPath, &fileID, &actionKind, &errorCat, &conflictInt)
 	if err != nil {
 		return ReviewItemView{}, err
 	}
@@ -757,27 +843,74 @@ func (s *Service) DecideItem(ctx context.Context, in ItemDecisionInput) (ReviewI
 
 	var editedRel, editedName sql.NullString
 	effectiveRel := proposedRel
+	if curEditedRel != "" {
+		effectiveRel = curEditedRel
+	}
 
-	if strings.TrimSpace(in.UserEditedName) != "" || strings.TrimSpace(in.UserEditedRelPath) != "" {
+	if strings.TrimSpace(in.UserEditedName) != "" || strings.TrimSpace(in.UserEditedRelPath) != "" || strings.TrimSpace(in.UserEditedDirPath) != "" {
+		baseEffective := effectiveRel
+		curBaseName := filepath.Base(filepath.FromSlash(baseEffective))
+		curDirRel := filepath.ToSlash(filepath.Dir(filepath.FromSlash(baseEffective)))
+		if curDirRel == "." {
+			curDirRel = ""
+		}
+
 		newName := strings.TrimSpace(in.UserEditedName)
-		if newName == "" {
+		if newName == "" && strings.TrimSpace(in.UserEditedRelPath) != "" {
 			newName = filepath.Base(filepath.FromSlash(in.UserEditedRelPath))
+		}
+		if newName == "" {
+			newName = curBaseName
 		}
 		if naming.IsShortsExtension(oldName) && !naming.IsShortsExtension(newName) {
 			return ReviewItemView{}, errors.New("safety law: .shorts extension is protected and cannot be removed or changed")
 		}
-		newRel := strings.TrimSpace(in.UserEditedRelPath)
-		if newRel == "" {
-			parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(proposedRel)))
-			newRel = parent + "/" + newName
+
+		var newRel string
+		if strings.TrimSpace(in.UserEditedRelPath) != "" {
+			newRel = normalizeSlash(in.UserEditedRelPath)
+		} else if strings.TrimSpace(in.UserEditedDirPath) != "" {
+			cleanDir := normalizeSlash(in.UserEditedDirPath)
+			if cleanDir == "" || cleanDir == "." {
+				newRel = newName
+			} else {
+				newRel = cleanDir + "/" + newName
+			}
+		} else {
+			if curDirRel == "" {
+				newRel = newName
+			} else {
+				newRel = curDirRel + "/" + newName
+			}
 		}
-		editedName = sql.NullString{String: newName, Valid: true}
+
+		if strings.Contains(newRel, "..") {
+			return ReviewItemView{}, errors.New("safety law: relative destination cannot contain '..'")
+		}
+
+		editedName = sql.NullString{String: filepath.Base(filepath.FromSlash(newRel)), Valid: true}
 		editedRel = sql.NullString{String: filepath.ToSlash(newRel), Valid: true}
 		effectiveRel = editedRel.String
 
+		oldDir := normalizeSlash(filepath.ToSlash(filepath.Dir(filepath.FromSlash(oldRel))))
+		if oldDir == "." {
+			oldDir = ""
+		}
+		newDir := normalizeSlash(filepath.ToSlash(filepath.Dir(filepath.FromSlash(effectiveRel))))
+		if newDir == "." {
+			newDir = ""
+		}
+		if actionKind == "move" || actionKind == "rename" {
+			if oldDir == newDir {
+				actionKind = "rename"
+			} else {
+				actionKind = "move"
+			}
+		}
+
 		conflict, msg := s.detectDestinationConflict(ctx, diskID, mountPath, effectiveRel, fileID, nil)
 		conflictInt = boolInt(conflict)
-		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET conflict_detected = ?, conflict_details = ? WHERE id = ?`, conflictInt, msg, in.ItemID)
+		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE review_items SET action_kind = ?, conflict_detected = ?, conflict_details = ? WHERE id = ?`, actionKind, conflictInt, msg, in.ItemID)
 	}
 
 	if in.Decision == "approved" && conflictInt == 1 {
@@ -818,6 +951,238 @@ func (s *Service) DecideItem(ctx context.Context, in ItemDecisionInput) (ReviewI
 		}
 	}
 	return ReviewItemView{}, sql.ErrNoRows
+}
+
+func (s *Service) BulkDecideItems(ctx context.Context, in BulkDecisionInput) (BulkDecisionResult, error) {
+	res := BulkDecisionResult{
+		BatchID:  in.BatchID,
+		Warnings: []string{},
+	}
+	switch in.Decision {
+	case "approved", "rejected", "deferred", "pending":
+	default:
+		return res, fmt.Errorf("review: unsupported bulk decision %q", in.Decision)
+	}
+
+	for _, rawID := range in.ItemIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		var curStatus string
+		if err := s.sqlDB.QueryRowContext(ctx, `SELECT decision_status FROM review_items WHERE id = ?`, id).Scan(&curStatus); err != nil {
+			res.SkippedCount++
+			continue
+		}
+		if curStatus == "executed" {
+			res.SkippedCount++
+			continue
+		}
+		if _, dErr := s.DecideItem(ctx, ItemDecisionInput{
+			ItemID:   id,
+			Decision: in.Decision,
+		}); dErr != nil {
+			res.SkippedCount++
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %v", id, dErr))
+			continue
+		}
+		res.UpdatedCount++
+	}
+	if in.BatchID != "" {
+		s.recomputeBatchStatus(ctx, in.BatchID)
+	}
+	return res, nil
+}
+
+func (s *Service) GetItemDetails(ctx context.Context, itemID string) (ReviewItemDetailView, error) {
+	var batchID string
+	if err := s.sqlDB.QueryRowContext(ctx, `SELECT batch_id FROM review_items WHERE id = ?`, strings.TrimSpace(itemID)).Scan(&batchID); err != nil {
+		return ReviewItemDetailView{}, err
+	}
+	items, err := s.ListBatchItems(ctx, batchID)
+	if err != nil {
+		return ReviewItemDetailView{}, err
+	}
+	var found *ReviewItemView
+	for i := range items {
+		if items[i].ID == strings.TrimSpace(itemID) {
+			found = &items[i]
+			break
+		}
+	}
+	if found == nil {
+		return ReviewItemDetailView{}, sql.ErrNoRows
+	}
+
+	detail := ReviewItemDetailView{
+		Item: *found,
+	}
+	if found.FileID != "" {
+		_ = s.sqlDB.QueryRowContext(ctx, `
+			SELECT extension, COALESCE(sha256_hash, ''), duration_seconds, video_width, video_height,
+			       probe_status, integrity_status, presence_status
+			FROM media_files
+			WHERE id = ?
+		`, found.FileID).Scan(
+			&detail.Extension, &detail.FileSHA256, &detail.DurationSeconds,
+			&detail.VideoWidth, &detail.VideoHeight, &detail.ProbeStatus,
+			&detail.IntegrityStatus, &detail.PresenceStatus,
+		)
+	}
+	if found.WorkID != "" {
+		_ = s.sqlDB.QueryRowContext(ctx, `
+			SELECT COALESCE(production_year, 0), identification_status
+			FROM works WHERE id = ?
+		`, found.WorkID).Scan(&detail.ProductionYear, &detail.WorkStatus)
+	}
+	_ = s.sqlDB.QueryRowContext(ctx, `
+		SELECT COALESCE(error_message, '')
+		FROM operation_journal
+		WHERE review_item_id = ?
+		ORDER BY step_sequence DESC LIMIT 1
+	`, found.ID).Scan(&detail.LastJournalMsg)
+
+	return detail, nil
+}
+
+func (s *Service) BuildExecutionManifestSummary(ctx context.Context, batchID string) (ExecutionManifestSummary, error) {
+	batch, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		return ExecutionManifestSummary{}, err
+	}
+
+	out := ExecutionManifestSummary{
+		BatchID:       batch.ID,
+		BatchTitle:    batch.Title,
+		BatchStatus:   batch.BatchStatus,
+		TargetFolders: []string{},
+		Steps:         []ManifestStepSpec{},
+	}
+
+	rows, err := s.sqlDB.QueryContext(ctx, `
+		SELECT ri.id, COALESCE(ri.file_id, ''),
+		       COALESCE(mf.root_id, ''), COALESCE(lr.relative_root_path, ''),
+		       ri.item_file_kind, COALESCE(mf.file_kind, CASE WHEN ri.item_file_kind = 'directory' THEN 'directory' ELSE 'unknown_extra' END),
+		       ri.action_kind, ri.error_category_code, ri.reason_description,
+		       ri.source_disk_id, d.label, d.mount_path,
+		       ri.old_rel_path, ri.old_name,
+		       COALESCE(NULLIF(ri.user_edited_rel_path, ''), ri.proposed_rel_path),
+		       COALESCE(NULLIF(ri.user_edited_name, ''), ri.proposed_name),
+		       COALESCE(ri.decided_at, '')
+		FROM review_items ri
+		JOIN disks d ON d.id = ri.source_disk_id
+		LEFT JOIN media_files mf ON mf.id = ri.file_id
+		LEFT JOIN library_roots lr ON lr.id = mf.root_id
+		WHERE ri.batch_id = ? AND ri.decision_status = 'approved'
+		ORDER BY CASE ri.item_file_kind WHEN 'file' THEN 0 ELSE 1 END ASC, ri.created_at ASC, ri.id ASC
+	`, batchID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+
+	newDirsSet := map[string]string{}
+	approvedFileIDs := map[string]bool{}
+	seq := 0
+
+	for rows.Next() {
+		seq++
+		var st ManifestStepSpec
+		if err := rows.Scan(
+			&st.ReviewItemID, &st.FileID,
+			&st.RootID, &st.RootRelPath,
+			&st.ItemFileKind, &st.MediaFileKind,
+			&st.ActionKind, &st.ErrorCategoryCode, &st.ReasonDescription,
+			&st.DiskID, &st.DiskLabel, &st.MountPath,
+			&st.OldRelPath, &st.OldName,
+			&st.EffectiveRelPath, &st.EffectiveName,
+			&st.ApprovedAt,
+		); err != nil {
+			return out, err
+		}
+		st.Sequence = seq
+		st.EffectiveName = filepath.Base(filepath.FromSlash(st.EffectiveRelPath))
+		st.ProtectedShortsFile = naming.IsShortsExtension(st.OldName) || st.MediaFileKind == "shorts"
+		out.Steps = append(out.Steps, st)
+
+		if st.FileID != "" {
+			approvedFileIDs[st.FileID] = true
+		}
+
+		oldDir := normalizeSlash(filepath.ToSlash(filepath.Dir(filepath.FromSlash(st.OldRelPath))))
+		newDir := normalizeSlash(filepath.ToSlash(filepath.Dir(filepath.FromSlash(st.EffectiveRelPath))))
+		if oldDir == "." {
+			oldDir = ""
+		}
+		if newDir == "." {
+			newDir = ""
+		}
+
+		if st.ItemFileKind == "directory" {
+			if st.ActionKind == "move_to_errors" && st.ErrorCategoryCode == string(errorsbox.CategoryEmptyFolders) {
+				out.EmptyFoldersToMoveErrors++
+			}
+		} else {
+			if st.ActionKind == "rename" || (st.ActionKind != "move_to_errors" && oldDir == newDir && st.OldName != st.EffectiveName) {
+				out.FilesToRename++
+			} else if st.ActionKind == "move" || st.ActionKind == "move_to_errors" || oldDir != newDir {
+				out.FilesToMove++
+			}
+			if st.MediaFileKind == "subtitle" && st.ActionKind != "move_to_errors" {
+				out.SubtitlesToAssociate++
+			}
+			if st.MediaFileKind == "image" && st.ActionKind != "move_to_errors" {
+				out.PostersArtworkToAssociate++
+			}
+		}
+
+		if newDir != "" && st.MountPath != "" {
+			fullTargetDir := library.ResolveFullPath(st.MountPath, newDir)
+			if _, statErr := os.Stat(fullTargetDir); os.IsNotExist(statErr) {
+				key := st.DiskID + "|" + strings.ToLower(newDir)
+				newDirsSet[key] = newDir
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+
+	out.TotalApprovedOperations = len(out.Steps)
+	for _, dirRel := range newDirsSet {
+		out.TargetFolders = append(out.TargetFolders, dirRel)
+	}
+	sort.Strings(out.TargetFolders)
+	out.FoldersToCreate = len(out.TargetFolders)
+
+	_ = s.sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM media_files mf
+		JOIN disks d ON d.id = mf.disk_id
+		WHERE mf.file_kind = 'shorts' AND mf.presence_status = 'present' AND d.connection_state = 'online'
+	`).Scan(&out.ShortsToPreserve)
+
+	_ = s.sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM review_items
+		WHERE batch_id = ? AND conflict_detected = 1 AND decision_status NOT IN ('approved', 'rejected', 'executed', 'rolled_back')
+	`, batchID).Scan(&out.UnresolvedConflicts)
+
+	var totalPresentFiles int
+	_ = s.sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM media_files mf
+		JOIN disks d ON d.id = mf.disk_id
+		WHERE mf.presence_status = 'present' AND d.connection_state = 'online'
+	`).Scan(&totalPresentFiles)
+	unchanged := totalPresentFiles - len(approvedFileIDs)
+	if unchanged < 0 {
+		unchanged = 0
+	}
+	out.UnchangedFilesCount = unchanged
+
+	canonicalBytes, _ := json.Marshal(out.Steps)
+	sum := sha256.Sum256(canonicalBytes)
+	out.ManifestSHA256 = hex.EncodeToString(sum[:])
+
+	return out, nil
 }
 
 func (s *Service) ApproveAllSafeItems(ctx context.Context, batchID string) (ReviewBatchView, error) {
@@ -877,6 +1242,7 @@ func (s *Service) ListBatches(ctx context.Context) ([]ReviewBatchView, error) {
 		SELECT b.id, b.title, b.batch_type, b.batch_status, b.total_items, b.approved_items,
 		       COALESCE(b.approved_by_user_at, ''), b.created_at,
 		       (SELECT COUNT(*) FROM review_items ri WHERE ri.batch_id = b.id AND ri.decision_status = 'pending'),
+		       (SELECT COUNT(*) FROM review_items ri WHERE ri.batch_id = b.id AND ri.decision_status = 'rejected'),
 		       (SELECT COUNT(*) FROM review_items ri WHERE ri.batch_id = b.id AND ri.decision_status = 'executed')
 		FROM review_batches b
 		ORDER BY b.created_at DESC
@@ -892,7 +1258,7 @@ func (s *Service) ListBatches(ctx context.Context) ([]ReviewBatchView, error) {
 		var v ReviewBatchView
 		if err := rows.Scan(
 			&v.ID, &v.Title, &v.BatchType, &v.BatchStatus, &v.TotalItems, &v.ApprovedItems,
-			&v.ApprovedByAt, &v.CreatedAt, &v.PendingItems, &v.ExecutedItems,
+			&v.ApprovedByAt, &v.CreatedAt, &v.PendingItems, &v.RejectedItems, &v.ExecutedItems,
 		); err != nil {
 			return nil, err
 		}
@@ -904,15 +1270,23 @@ func (s *Service) ListBatches(ctx context.Context) ([]ReviewBatchView, error) {
 func (s *Service) ListBatchItems(ctx context.Context, batchID string) ([]ReviewItemView, error) {
 	rows, err := s.sqlDB.QueryContext(ctx, `
 		SELECT ri.id, ri.batch_id, COALESCE(ri.file_id, ''), COALESCE(ri.work_id, ''),
-		       ri.item_file_kind, ri.action_kind, ri.error_category_code,
+		       COALESCE(w.canonical_folder_name, COALESCE(w.title_original, '')), COALESCE(w.media_type, ''),
+		       ri.item_file_kind,
+		       COALESCE(mf.file_kind, CASE WHEN ri.item_file_kind = 'directory' THEN 'directory' ELSE 'unknown_extra' END),
+		       ri.action_kind, ri.error_category_code,
 		       ri.source_disk_id, d.label, d.mount_path,
 		       ri.old_rel_path, ri.old_name, ri.target_disk_id,
 		       ri.proposed_rel_path, ri.proposed_name,
 		       COALESCE(ri.user_edited_rel_path, ''), COALESCE(ri.user_edited_name, ''),
 		       ri.reason_description, ri.decision_status, ri.confidence_score,
-		       ri.conflict_detected, ri.conflict_details, ri.linked_files_json, ri.safety_checks_json
+		       ri.conflict_detected, ri.conflict_details, ri.linked_files_json, ri.safety_checks_json,
+		       COALESCE(mf.size_bytes, 0), COALESCE(mv.resolution_label, ''), COALESCE(mv.video_codec, COALESCE(mf.video_codec, '')),
+		       COALESCE((SELECT oj.operation_state FROM operation_journal oj WHERE oj.review_item_id = ri.id ORDER BY oj.step_sequence DESC LIMIT 1), '')
 		FROM review_items ri
 		JOIN disks d ON d.id = ri.source_disk_id
+		LEFT JOIN media_files mf ON mf.id = ri.file_id
+		LEFT JOIN works w ON w.id = ri.work_id
+		LEFT JOIN media_versions mv ON mv.file_id = ri.file_id
 		WHERE ri.batch_id = ?
 		ORDER BY CASE ri.item_file_kind WHEN 'file' THEN 0 ELSE 1 END ASC, ri.old_rel_path ASC
 	`, batchID)
@@ -928,13 +1302,17 @@ func (s *Service) ListBatchItems(ctx context.Context, batchID string) ([]ReviewI
 		var confInt int
 		if err := rows.Scan(
 			&it.ID, &it.BatchID, &it.FileID, &it.WorkID,
-			&it.ItemFileKind, &it.ActionKind, &it.ErrorCategoryCode,
+			&it.WorkTitle, &it.WorkMediaType,
+			&it.ItemFileKind, &it.MediaFileKind,
+			&it.ActionKind, &it.ErrorCategoryCode,
 			&it.SourceDiskID, &it.DiskLabel, &mountPath,
 			&it.OldRelPath, &it.OldName, &it.TargetDiskID,
 			&it.ProposedRelPath, &it.ProposedName,
 			&it.UserEditedRelPath, &it.UserEditedName,
 			&it.ReasonDescription, &it.DecisionStatus, &it.ConfidenceScore,
 			&confInt, &it.ConflictDetails, &linkedJSON, &checksJSON,
+			&it.FileSizeBytes, &it.ResolutionLabel, &it.VideoCodec,
+			&it.OperationState,
 		); err != nil {
 			return nil, err
 		}
@@ -942,13 +1320,31 @@ func (s *Service) ListBatchItems(ctx context.Context, batchID string) ([]ReviewI
 			it.ActionKind = "needs_manual_review"
 		}
 		it.ConflictDetected = confInt == 1
+		oldDir := filepath.ToSlash(filepath.Dir(filepath.FromSlash(it.OldRelPath)))
+		if oldDir == "." {
+			oldDir = "/"
+		}
+		it.OldDirPath = oldDir
 		it.OldFullPath = library.ResolveFullPath(mountPath, it.OldRelPath)
+
+		propDir := filepath.ToSlash(filepath.Dir(filepath.FromSlash(it.ProposedRelPath)))
+		if propDir == "." {
+			propDir = "/"
+		}
+		it.ProposedDirPath = propDir
+
 		it.EffectiveRelPath = it.ProposedRelPath
 		if it.UserEditedRelPath != "" {
 			it.EffectiveRelPath = it.UserEditedRelPath
 		}
+		effDir := filepath.ToSlash(filepath.Dir(filepath.FromSlash(it.EffectiveRelPath)))
+		if effDir == "." {
+			effDir = "/"
+		}
+		it.EffectiveDirPath = effDir
+		it.EffectiveName = filepath.Base(filepath.FromSlash(it.EffectiveRelPath))
 		it.EffectiveFullPath = library.ResolveFullPath(mountPath, it.EffectiveRelPath)
-		it.ProtectedShortsFile = naming.IsShortsExtension(it.OldName)
+		it.ProtectedShortsFile = naming.IsShortsExtension(it.OldName) || it.MediaFileKind == "shorts"
 		_ = json.Unmarshal([]byte(linkedJSON), &it.LinkedCompanions)
 		if it.LinkedCompanions == nil {
 			it.LinkedCompanions = []string{}

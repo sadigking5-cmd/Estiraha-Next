@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/sadigking5-cmd/Estiraha-Next/frontend"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/api"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/app"
 	"github.com/sadigking5-cmd/Estiraha-Next/internal/config"
@@ -34,6 +37,8 @@ func main() {
 	headless := flag.Bool("headless", false, "Suppress interactive MessageBox dialogs during automated tests")
 	smokeReport := flag.String("poc-smoke-report", "", "Run automated Windows Desktop PoC smoke cycle, write JSON report, and quit cleanly")
 	holdMs := flag.Int("poc-hold-ms", 4500, "Milliseconds to hold native window open during --poc-smoke-report for screenshot capture")
+	uiPreviewAddr := flag.String("ui-preview-addr", "", "Optional local HTTP bind address (e.g. 127.0.0.1:18080) for headless CI UI verification")
+	uiPreviewDir := flag.String("ui-preview-data-dir", "", "Optional isolated temp directory for --ui-preview-addr SQLite DB & backups")
 	flag.Parse()
 
 	cfg := config.Default()
@@ -51,6 +56,14 @@ func main() {
 
 	if *selfCheck {
 		runSelfCheck(cfg, *simMissingWV2)
+		return
+	}
+
+	if *uiPreviewAddr != "" {
+		if err := runUIPreviewServer(cfg, *uiPreviewAddr, *uiPreviewDir); err != nil {
+			fmt.Fprintf(os.Stderr, "ui-preview error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -117,4 +130,50 @@ func runSelfCheck(cfg config.Config, simMissingWV2 bool) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(summary)
+}
+
+func runUIPreviewServer(cfg config.Config, addr, dataDir string) error {
+	ctx := context.Background()
+	workDir := dataDir
+	if workDir == "" {
+		tmp, err := os.MkdirTemp("", "estiraha-ui-preview-*")
+		if err != nil {
+			return err
+		}
+		workDir = tmp
+	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return err
+	}
+
+	dbPath := filepath.Join(workDir, "library.sqlite")
+	backupDir := filepath.Join(workDir, "Backups")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return err
+	}
+
+	engine, err := db.Open(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer engine.Close()
+
+	if _, err := engine.Migrate(ctx, backupDir); err != nil {
+		return err
+	}
+
+	distFS, err := frontend.DistFS()
+	if err != nil {
+		return err
+	}
+
+	vault := secrets.NewDefaultVault()
+	libSvc := api.NewLibraryService(cfg, engine, vault, backupDir, nil)
+	defer libSvc.Close()
+
+	trayTracker := tray.NewStateTracker()
+	pocSvc := api.NewPoCService(cfg, engine, vault, trayTracker, app.DetectWebView2(false), nil)
+
+	handler := api.NewUIPreviewHandler(distFS, libSvc, pocSvc)
+	fmt.Printf("Estiraha Next UI Preview listening on http://%s (dataDir=%s)\n", addr, workDir)
+	return http.ListenAndServe(addr, handler)
 }

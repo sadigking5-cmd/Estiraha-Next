@@ -415,6 +415,24 @@ func (s *LibraryService) DecideReviewItem(in review.ItemDecisionInput) (review.R
 	return s.reviewSvc.DecideItem(ctx, in)
 }
 
+func (s *LibraryService) BulkDecideReviewItems(in review.BulkDecisionInput) (review.BulkDecisionResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return s.reviewSvc.BulkDecideItems(ctx, in)
+}
+
+func (s *LibraryService) GetReviewItemDetails(itemID string) (review.ReviewItemDetailView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.reviewSvc.GetItemDetails(ctx, itemID)
+}
+
+func (s *LibraryService) GetExecutionManifestSummary(batchID string) (review.ExecutionManifestSummary, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return s.reviewSvc.BuildExecutionManifestSummary(ctx, batchID)
+}
+
 func (s *LibraryService) ApproveAllSafeReviewItems(batchID string) (review.ReviewBatchView, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -425,9 +443,36 @@ func (s *LibraryService) ExecuteApprovedBatch(batchID string) (organizer.Executi
 	if s.scanSvc.IsRunning() {
 		return organizer.ExecutionResult{}, errors.New("safety lock: cannot execute file organization while a library scan is running")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	return s.orgSvc.ExecuteApprovedBatch(ctx, batchID)
+}
+
+func (s *LibraryService) PauseBatchExecution() bool {
+	return s.orgSvc.PauseExecution()
+}
+
+func (s *LibraryService) ResumeBatchExecution() bool {
+	return s.orgSvc.ResumeExecution()
+}
+
+func (s *LibraryService) CancelBatchExecution() bool {
+	return s.orgSvc.CancelExecution()
+}
+
+func (s *LibraryService) GetBatchExecutionProgress(batchID string) (organizer.ExecutionProgressView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.orgSvc.GetExecutionProgress(ctx, batchID)
+}
+
+func (s *LibraryService) RecoverInterruptedBatch(batchID string) (organizer.RecoveryResult, error) {
+	if s.scanSvc.IsRunning() {
+		return organizer.RecoveryResult{}, errors.New("safety lock: cannot recover batch while a library scan is running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return s.orgSvc.RecoverInterruptedBatch(ctx, batchID)
 }
 
 func (s *LibraryService) RollbackBatch(batchID string) (organizer.RollbackResult, error) {
@@ -459,6 +504,12 @@ func (s *LibraryService) ListErrorFolderEntries(categoryFilter string) ([]errors
 	return s.errBoxSvc.ListEntries(ctx, cat, "")
 }
 
+func (s *LibraryService) InspectErrorFolderEntry(entryID string) (errorsbox.EntryView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.errBoxSvc.GetEntry(ctx, strings.TrimSpace(entryID))
+}
+
 func (s *LibraryService) RestoreErrorFolderEntry(entryID string) (errorsbox.EntryView, error) {
 	if s.scanSvc.IsRunning() {
 		return errorsbox.EntryView{}, errors.New("safety lock: cannot restore files while a library scan is running")
@@ -466,6 +517,24 @@ func (s *LibraryService) RestoreErrorFolderEntry(entryID string) (errorsbox.Entr
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return s.errBoxSvc.RestoreEntry(ctx, strings.TrimSpace(entryID))
+}
+
+func (s *LibraryService) RestoreSelectedErrorFolderEntries(entryIDs []string) (errorsbox.BatchRestoreSummary, error) {
+	if s.scanSvc.IsRunning() {
+		return errorsbox.BatchRestoreSummary{}, errors.New("safety lock: cannot restore files while a library scan is running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return s.errBoxSvc.RestoreSelectedEntries(ctx, entryIDs)
+}
+
+func (s *LibraryService) RestoreErrorFolderBatch(batchID string) (errorsbox.BatchRestoreSummary, error) {
+	if s.scanSvc.IsRunning() {
+		return errorsbox.BatchRestoreSummary{}, errors.New("safety lock: cannot restore batch while a library scan is running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return s.errBoxSvc.RestoreBatchEntries(ctx, strings.TrimSpace(batchID))
 }
 
 func (s *LibraryService) RefreshAndListHealthIssues(kindFilter string) ([]reports.HealthIssueView, error) {

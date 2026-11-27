@@ -128,15 +128,19 @@ func IsInsideManagedErrorPath(relOrFullPath string) bool {
 type EntryView struct {
 	ID               string       `json:"id"`
 	DiskID           string       `json:"diskId"`
+	DiskLabel        string       `json:"diskLabel"`
 	RootID           string       `json:"rootId"`
 	FileID           string       `json:"fileId"`
 	BatchID          string       `json:"batchId"`
+	BatchTitle       string       `json:"batchTitle"`
 	JournalID        string       `json:"journalId"`
 	EntryKind        string       `json:"entryKind"`
 	CategoryCode     CategoryCode `json:"categoryCode"`
 	CategoryFolderAr string       `json:"categoryFolderAr"`
 	OriginalRelPath  string       `json:"originalRelPath"`
+	OriginalFullPath string       `json:"originalFullPath"`
 	ErrorRelPath     string       `json:"errorRelPath"`
+	ErrorFullPath    string       `json:"errorFullPath"`
 	ItemName         string       `json:"itemName"`
 	SizeBytes        int64        `json:"sizeBytes"`
 	SHA256Hash       string       `json:"sha256Hash"`
@@ -145,6 +149,15 @@ type EntryView struct {
 	EntryStatus      string       `json:"entryStatus"`
 	MovedAt          string       `json:"movedAt"`
 	RestoredAt       string       `json:"restoredAt"`
+}
+
+// BatchRestoreSummary reports the result of restoring multiple selected error entries or a reversible batch.
+type BatchRestoreSummary struct {
+	RestoredCount int         `json:"restoredCount"`
+	BlockedCount  int         `json:"blockedCount"`
+	RestoredItems []EntryView `json:"restoredItems"`
+	Errors        []string    `json:"errors"`
+	CompletedAt   string      `json:"completedAt"`
 }
 
 // MoveToErrorsRequest encapsulates a permit-gated move into `الأخطاء/<التصنيف>/`.
@@ -446,48 +459,54 @@ func (s *Service) MoveApprovedItem(ctx context.Context, req MoveToErrorsRequest)
 		`, targetRel, newParent, newBase, hashNullable, nowStr, req.FileID)
 	}
 
-	return EntryView{
-		ID:               entryID,
-		DiskID:           req.DiskID,
-		RootID:           req.RootID,
-		FileID:           req.FileID,
-		BatchID:          req.Permit.BatchID,
-		JournalID:        req.JournalID,
-		EntryKind:        entryKind,
-		CategoryCode:     spec.Code,
-		CategoryFolderAr: spec.FolderAr,
-		OriginalRelPath:  filepath.ToSlash(req.OriginalRelPath),
-		ErrorRelPath:     targetRel,
-		ItemName:         origBase,
-		SizeBytes:        sizeBytes,
-		SHA256Hash:       preHash,
-		ReasonAr:         req.ReasonAr,
-		ReasonEn:         req.ReasonEn,
-		EntryStatus:      "active",
-		MovedAt:          nowStr,
-	}, nil
-}
+		return EntryView{
+			ID:               entryID,
+			DiskID:           req.DiskID,
+			RootID:           req.RootID,
+			FileID:           req.FileID,
+			BatchID:          req.Permit.BatchID,
+			JournalID:        req.JournalID,
+			EntryKind:        entryKind,
+			CategoryCode:     spec.Code,
+			CategoryFolderAr: spec.FolderAr,
+			OriginalRelPath:  filepath.ToSlash(req.OriginalRelPath),
+			OriginalFullPath: srcFull,
+			ErrorRelPath:     targetRel,
+			ErrorFullPath:    dstFull,
+			ItemName:         origBase,
+			SizeBytes:        sizeBytes,
+			SHA256Hash:       preHash,
+			ReasonAr:         req.ReasonAr,
+			ReasonEn:         req.ReasonEn,
+			EntryStatus:      "active",
+			MovedAt:          nowStr,
+		}, nil
+	}
 
 // RestoreEntry restores a previously quarantined file or folder back to its exact original path
 // while verifying SHA-256 integrity and forbidding overwrites.
 func (s *Service) RestoreEntry(ctx context.Context, entryID string) (EntryView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.restoreEntryLocked(ctx, strings.TrimSpace(entryID))
+}
 
+func (s *Service) restoreEntryLocked(ctx context.Context, entryID string) (EntryView, error) {
 	var ev EntryView
 	var mountPath string
-	var rootID, fileID, batchID, journalID, shaHash, restoredAt sql.NullString
+	var rootID, fileID, batchID, batchTitle, journalID, shaHash, restoredAt sql.NullString
 	var catCode string
 
 	err := s.sqlDB.QueryRowContext(ctx, `
-		SELECT e.id, e.disk_id, d.mount_path, e.root_id, e.file_id, e.batch_id, e.journal_id,
+		SELECT e.id, e.disk_id, d.label, d.mount_path, e.root_id, e.file_id, e.batch_id, COALESCE(rb.title, ''), e.journal_id,
 		       e.entry_kind, e.category_code, e.category_folder_ar, e.original_rel_path, e.error_rel_path,
 		       e.item_name, e.size_bytes, e.sha256_hash, e.reason_ar, e.reason_en, e.entry_status, e.moved_at, e.restored_at
 		FROM error_folder_entries e
 		JOIN disks d ON d.id = e.disk_id
+		LEFT JOIN review_batches rb ON rb.id = e.batch_id
 		WHERE e.id = ?
 	`, entryID).Scan(
-		&ev.ID, &ev.DiskID, &mountPath, &rootID, &fileID, &batchID, &journalID,
+		&ev.ID, &ev.DiskID, &ev.DiskLabel, &mountPath, &rootID, &fileID, &batchID, &batchTitle, &journalID,
 		&ev.EntryKind, &catCode, &ev.CategoryFolderAr, &ev.OriginalRelPath, &ev.ErrorRelPath,
 		&ev.ItemName, &ev.SizeBytes, &shaHash, &ev.ReasonAr, &ev.ReasonEn, &ev.EntryStatus, &ev.MovedAt, &restoredAt,
 	)
@@ -501,16 +520,19 @@ func (s *Service) RestoreEntry(ctx context.Context, entryID string) (EntryView, 
 	ev.RootID = rootID.String
 	ev.FileID = fileID.String
 	ev.BatchID = batchID.String
+	ev.BatchTitle = batchTitle.String
 	ev.JournalID = journalID.String
 	ev.SHA256Hash = shaHash.String
 	ev.RestoredAt = restoredAt.String
 
+	curFull := library.ResolveFullPath(mountPath, ev.ErrorRelPath)
+	origFull := library.ResolveFullPath(mountPath, ev.OriginalRelPath)
+	ev.ErrorFullPath = curFull
+	ev.OriginalFullPath = origFull
+
 	if ev.EntryStatus == "restored" {
 		return ev, nil
 	}
-
-	curFull := library.ResolveFullPath(mountPath, ev.ErrorRelPath)
-	origFull := library.ResolveFullPath(mountPath, ev.OriginalRelPath)
 
 	if _, err := os.Stat(origFull); err == nil {
 		return EntryView{}, fmt.Errorf("%w: %s", ErrRestoreCollision, origFull)
@@ -561,30 +583,144 @@ func (s *Service) RestoreEntry(ctx context.Context, entryID string) (EntryView, 
 		`, ev.OriginalRelPath, origParent, origBase, nowStr, ev.FileID)
 	}
 
+	if ev.JournalID != "" {
+		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE operation_journal SET operation_state = 'rolled_back' WHERE id = ?`, ev.JournalID)
+		_, _ = s.sqlDB.ExecContext(ctx, `UPDATE rollback_steps SET rollback_status = 'executed', executed_at = ? WHERE error_entry_id = ? AND rollback_status = 'ready'`, nowStr, ev.ID)
+	}
+
 	ev.EntryStatus = "restored"
 	ev.RestoredAt = nowStr
 	return ev, nil
 }
 
+// GetEntry returns full inspection metadata for a single Error Center item.
+func (s *Service) GetEntry(ctx context.Context, entryID string) (EntryView, error) {
+	entries, err := s.ListEntries(ctx, "", "")
+	if err != nil {
+		return EntryView{}, err
+	}
+	target := strings.TrimSpace(entryID)
+	for _, ev := range entries {
+		if ev.ID == target {
+			return ev, nil
+		}
+	}
+	return EntryView{}, ErrEntryNotFound
+}
+
+// RestoreSelectedEntries restores multiple user-selected Error Center entries safely in order
+// (empty directories first so any original parent directories exist cleanly, then files).
+func (s *Service) RestoreSelectedEntries(ctx context.Context, entryIDs []string) (BatchRestoreSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	summary := BatchRestoreSummary{
+		RestoredItems: []EntryView{},
+		Errors:        []string{},
+	}
+	seen := map[string]bool{}
+	var cleanIDs []string
+	for _, id := range entryIDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			cleanIDs = append(cleanIDs, trimmed)
+		}
+	}
+	if len(cleanIDs) == 0 {
+		summary.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return summary, nil
+	}
+
+	placeholders := make([]string, len(cleanIDs))
+	args := make([]any, len(cleanIDs))
+	for i, id := range cleanIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.sqlDB.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id FROM error_folder_entries
+		WHERE id IN (%s)
+		ORDER BY CASE entry_kind WHEN 'directory' THEN 0 ELSE 1 END ASC, moved_at DESC
+	`, strings.Join(placeholders, ",")), args...)
+	var orderedIDs []string
+	if err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				orderedIDs = append(orderedIDs, id)
+			}
+		}
+		rows.Close()
+	}
+	if len(orderedIDs) == 0 {
+		orderedIDs = cleanIDs
+	}
+
+	for _, id := range orderedIDs {
+		ev, rErr := s.restoreEntryLocked(ctx, id)
+		if rErr != nil {
+			summary.BlockedCount++
+			summary.Errors = append(summary.Errors, fmt.Sprintf("%s: %v", id, rErr))
+			continue
+		}
+		summary.RestoredCount++
+		summary.RestoredItems = append(summary.RestoredItems, ev)
+	}
+	summary.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return summary, nil
+}
+
+// RestoreBatchEntries restores all active quarantined Error Center entries belonging to a reversible batch.
+func (s *Service) RestoreBatchEntries(ctx context.Context, batchID string) (BatchRestoreSummary, error) {
+	rows, err := s.sqlDB.QueryContext(ctx, `
+		SELECT id FROM error_folder_entries
+		WHERE batch_id = ? AND entry_status = 'active'
+		ORDER BY CASE entry_kind WHEN 'directory' THEN 0 ELSE 1 END ASC, moved_at DESC
+	`, strings.TrimSpace(batchID))
+	if err != nil {
+		return BatchRestoreSummary{}, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return BatchRestoreSummary{
+			RestoredItems: []EntryView{},
+			Errors:        []string{},
+			CompletedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		}, nil
+	}
+	return s.RestoreSelectedEntries(ctx, ids)
+}
+
 // ListEntries returns tracked items in `الأخطاء/`, optionally filtered by category and status ("active", "restored", or "" for all).
 func (s *Service) ListEntries(ctx context.Context, category CategoryCode, status string) ([]EntryView, error) {
 	q := `
-		SELECT id, disk_id, COALESCE(root_id, ''), COALESCE(file_id, ''), COALESCE(batch_id, ''), COALESCE(journal_id, ''),
-		       entry_kind, category_code, category_folder_ar, original_rel_path, error_rel_path,
-		       item_name, size_bytes, COALESCE(sha256_hash, ''), reason_ar, reason_en, entry_status, moved_at, COALESCE(restored_at, '')
-		FROM error_folder_entries
+		SELECT e.id, e.disk_id, d.label, d.mount_path, COALESCE(e.root_id, ''), COALESCE(e.file_id, ''),
+		       COALESCE(e.batch_id, ''), COALESCE(rb.title, ''), COALESCE(e.journal_id, ''),
+		       e.entry_kind, e.category_code, e.category_folder_ar, e.original_rel_path, e.error_rel_path,
+		       e.item_name, e.size_bytes, COALESCE(e.sha256_hash, ''), e.reason_ar, e.reason_en, e.entry_status, e.moved_at, COALESCE(e.restored_at, '')
+		FROM error_folder_entries e
+		JOIN disks d ON d.id = e.disk_id
+		LEFT JOIN review_batches rb ON rb.id = e.batch_id
 		WHERE 1=1
 	`
 	args := []any{}
 	if category != "" {
-		q += ` AND category_code = ?`
+		q += ` AND e.category_code = ?`
 		args = append(args, string(category))
 	}
 	if status != "" {
-		q += ` AND entry_status = ?`
+		q += ` AND e.entry_status = ?`
 		args = append(args, status)
 	}
-	q += ` ORDER BY moved_at DESC`
+	q += ` ORDER BY e.moved_at DESC`
 
 	rows, err := s.sqlDB.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -595,15 +731,18 @@ func (s *Service) ListEntries(ctx context.Context, category CategoryCode, status
 	out := []EntryView{}
 	for rows.Next() {
 		var ev EntryView
-		var catStr string
+		var mountPath, catStr string
 		if err := rows.Scan(
-			&ev.ID, &ev.DiskID, &ev.RootID, &ev.FileID, &ev.BatchID, &ev.JournalID,
+			&ev.ID, &ev.DiskID, &ev.DiskLabel, &mountPath, &ev.RootID, &ev.FileID,
+			&ev.BatchID, &ev.BatchTitle, &ev.JournalID,
 			&ev.EntryKind, &catStr, &ev.CategoryFolderAr, &ev.OriginalRelPath, &ev.ErrorRelPath,
 			&ev.ItemName, &ev.SizeBytes, &ev.SHA256Hash, &ev.ReasonAr, &ev.ReasonEn, &ev.EntryStatus, &ev.MovedAt, &ev.RestoredAt,
 		); err != nil {
 			return nil, err
 		}
 		ev.CategoryCode = CategoryCode(catStr)
+		ev.OriginalFullPath = library.ResolveFullPath(mountPath, ev.OriginalRelPath)
+		ev.ErrorFullPath = library.ResolveFullPath(mountPath, ev.ErrorRelPath)
 		out = append(out, ev)
 	}
 	return out, rows.Err()

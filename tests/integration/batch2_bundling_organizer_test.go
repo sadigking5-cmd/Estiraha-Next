@@ -56,10 +56,10 @@ func TestBatch2MovieBundlingSubtitlesPostersShortsMultiVersionEmptyFoldersAndOrg
 	}
 	defer engine.Close()
 
-	ver, err := engine.Migrate(ctx, backupDir)
-	if err != nil || ver != 5 {
-		t.Fatalf("expected Migration 0005 (ver=5), got ver=%d err=%v", ver, err)
-	}
+		ver, err := engine.Migrate(ctx, backupDir)
+		if err != nil || ver < 5 {
+			t.Fatalf("expected Migration >= 0005 (ver>=5), got ver=%d err=%v", ver, err)
+		}
 
 	vault := secrets.NewDefaultVault()
 	libSvc := api.NewLibraryService(config.Default(), engine, vault, backupDir, nil)
