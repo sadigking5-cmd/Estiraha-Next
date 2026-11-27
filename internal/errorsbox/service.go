@@ -534,8 +534,16 @@ func (s *Service) restoreEntryLocked(ctx context.Context, entryID string) (Entry
 		return ev, nil
 	}
 
-	if _, err := os.Stat(origFull); err == nil {
-		return EntryView{}, fmt.Errorf("%w: %s", ErrRestoreCollision, origFull)
+	alreadyRecreatedDir := false
+	if st, err := os.Stat(origFull); err == nil {
+		if ev.EntryKind == "directory" && st.IsDir() {
+			if curEntries, rErr := os.ReadDir(curFull); rErr == nil && len(curEntries) == 0 {
+				alreadyRecreatedDir = true
+			}
+		}
+		if !alreadyRecreatedDir {
+			return EntryView{}, fmt.Errorf("%w: %s", ErrRestoreCollision, origFull)
+		}
 	}
 
 	if ev.EntryKind == "file" && ev.SHA256Hash != "" {
@@ -548,11 +556,17 @@ func (s *Service) restoreEntryLocked(ctx context.Context, entryID string) (Entry
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(origFull), 0o755); err != nil {
-		return EntryView{}, err
-	}
-	if err := os.Rename(curFull, origFull); err != nil {
-		return EntryView{}, fmt.Errorf("errorsbox: restore rename failed: %w", err)
+	if alreadyRecreatedDir {
+		if err := os.Remove(curFull); err != nil {
+			return EntryView{}, fmt.Errorf("errorsbox: clean evacuated dir marker failed: %w", err)
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Dir(origFull), 0o755); err != nil {
+			return EntryView{}, err
+		}
+		if err := os.Rename(curFull, origFull); err != nil {
+			return EntryView{}, fmt.Errorf("errorsbox: restore rename failed: %w", err)
+		}
 	}
 
 	if ev.EntryKind == "file" && ev.SHA256Hash != "" {

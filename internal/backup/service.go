@@ -100,8 +100,12 @@ func (s *Service) CreateVerifiedBackup(ctx context.Context, kind string) (Backup
 	}
 
 	id := domain.NewImmutableID()
-	ts := time.Now().UTC().Format("20060102-150405")
-	snapName := fmt.Sprintf("estiraha-%s-%s-%s.sqlite", kind, ts, id[:8])
+	ts := time.Now().UTC().Format("20060102-150405.000")
+	idSuffix := id
+	if len(id) >= 12 {
+		idSuffix = id[len(id)-12:]
+	}
+	snapName := fmt.Sprintf("estiraha-%s-%s-%s.sqlite", kind, ts, idSuffix)
 	snapPath := filepath.Join(s.backupDir, snapName)
 	escapedSnap := strings.ReplaceAll(snapPath, "'", "''")
 
